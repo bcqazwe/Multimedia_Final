@@ -1,8 +1,9 @@
 import cv2
 import numpy as np
+import time
 
 from Background import BackgroundScroller
-from control import ShipController
+from control import ShipController, BulletController
 
 class Game:
     def __init__(self):
@@ -32,6 +33,17 @@ class Game:
             self.DISPLAY_H,
             self.ship_display_img.shape[1],
             self.ship_display_img.shape[0],
+        )
+
+        self.bullet_img = cv2.imread('player_bullet.png', cv2.IMREAD_UNCHANGED)
+        self.bullet_controller = BulletController(
+            self.bullet_img,
+            self.DISPLAY_W,
+            self.DISPLAY_H,
+            self.ship_controller,
+            fire_interval=180,
+            speed=16,
+            max_bullets=6,
         )
             
         # 遊戲狀態
@@ -90,6 +102,7 @@ class Game:
         frame = self.background.get_frame()
         display_frame = cv2.resize(frame, (self.DISPLAY_W, self.DISPLAY_H), interpolation=cv2.INTER_NEAREST)
 
+        display_frame = self.bullet_controller.draw(display_frame)
         self.overlay_image(display_frame, self.ship_display_img, self.ship_controller.x, self.ship_controller.y)
 
         cv2.putText(display_frame, "USE WASD / ARROWS", (120, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
@@ -107,6 +120,12 @@ class Game:
         cv2.setMouseCallback('Space Shooter', self.handle_mouse)
         
         while True:
+            now_ms = int(time.time() * 1000)
+
+            if self.state == "RUNNING":
+                self.ship_controller.update()
+                self.bullet_controller.update(now_ms)
+
             if self.state == "START_MENU":
                 frame = self.draw_start_menu()
             else:
@@ -116,9 +135,6 @@ class Game:
             
             # 更新背景捲動
             self.background.update()
-
-            if self.state == "RUNNING":
-                self.ship_controller.update()
                 
             key = cv2.waitKey(16) & 0xFF
             if key == ord('q'):
@@ -126,6 +142,8 @@ class Game:
             elif key == ord('m'):
                 self.state = "START_MENU"
                 self.ship_controller.reset()
+                self.bullet_controller.bullets.clear()
+                self.bullet_controller.last_fire_time = 0
                 
         cv2.destroyAllWindows()
 
