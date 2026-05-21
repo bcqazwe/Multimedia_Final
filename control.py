@@ -1,7 +1,22 @@
 import ctypes
+import os
 
 import cv2
 import numpy as np
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def asset_path(filename):
+	return os.path.join(BASE_DIR, 'image', filename)
+
+
+def imread_unicode(path, flags=cv2.IMREAD_COLOR):
+	data = np.fromfile(path, dtype=np.uint8)
+	if data.size == 0:
+		return None
+	return cv2.imdecode(data, flags)
 
 
 class ShipController:
@@ -57,7 +72,7 @@ class BulletController:
 		self.bullets = []
 
 		if bullet_img is None:
-			bullet_img = cv2.imread('player_bullet.png', cv2.IMREAD_UNCHANGED)
+			bullet_img = imread_unicode(asset_path('player_bullet_stage1.png'), cv2.IMREAD_UNCHANGED)
 		if bullet_img is None:
 			bullet_img = np.zeros((16, 8, 4), dtype=np.uint8)
 			bullet_img[:, :, :3] = 255
