@@ -99,8 +99,18 @@ class Game:
         self.intro_played = False
         self.menu_img = imread_unicode(asset_path('menu.png'), cv2.IMREAD_UNCHANGED)
         self.menu_img = ensure_bgr(self.menu_img)
+        self.fail_img = imread_unicode(asset_path('fail.jpg'), cv2.IMREAD_UNCHANGED)
+        self.fail_img = ensure_bgr(self.fail_img)
         self.boss_phase_hp = 3333
         self.dual_attack_mode = False
+        self.fail_transition_started_ms = 0
+        self.fail_transition_stage = None
+        self.fail_transition_fade_out_ms = 420
+        self.score = 0
+        self.score_last_tick_ms = 0
+        self.last_damage_taken_ms = 0
+        self.multiplier = 1
+        self.multiplier_next_award_ms = 0
         
     def overlay_image(self, background, overlay, x, y):
         """將具有透明度的圖片疊加到背景上"""
@@ -146,10 +156,34 @@ class Game:
         image_y = int(y * menu_h / self.DISPLAY_H)
         return image_x, image_y
 
+    def _fail_click_to_image_space(self, x, y):
+        """將顯示器座標 (display) 映射回 fail 圖片的座標空間"""
+        if self.fail_img is None:
+            return x, y
+
+        img_h, img_w = self.fail_img.shape[:2]
+        image_x = int(x * img_w / self.DISPLAY_W)
+        image_y = int(y * img_h / self.DISPLAY_H)
+        return image_x, image_y
+
     def _start_button_clicked(self, x, y):
         image_x, image_y = self._menu_click_to_image_space(x, y)
         bx, by, bw, bh = self.start_button_rect
         return bx <= image_x <= bx + bw and by <= image_y <= by + bh
+
+    def _fail_restart_clicked(self, x, y):
+        image_x, image_y = self._fail_click_to_image_space(x, y)
+        return 44 <= image_x <= 273 and 493 <= image_y <= 546
+
+    def _fail_menu_clicked(self, x, y):
+        image_x, image_y = self._fail_click_to_image_space(x, y)
+        return 44 <= image_x <= 273 and 557 <= image_y <= 607
+
+    def _enter_fail_transition(self, now_ms):
+        if self.state not in ("FAIL_FADE_OUT", "FAIL_FADE_IN", "FAIL"):
+            self.state = "FAIL_FADE_OUT"
+            self.fail_transition_stage = "FADE_OUT"
+            self.fail_transition_started_ms = now_ms
 
     def draw_win_screen(self):
         display_frame = self.background.get_display_frame()
@@ -166,6 +200,25 @@ class Game:
         cv2.putText(display_frame, "MAIN MENU", (bx + 28, by + 40), font, 1, (0, 0, 0), 2, cv2.LINE_AA)
 
         return display_frame
+
+    def draw_fail_screen(self):
+        if self.fail_img is None:
+            return np.zeros((self.DISPLAY_H, self.DISPLAY_W, 3), dtype=np.uint8)
+
+        if self.fail_img.shape[1] != self.DISPLAY_W or self.fail_img.shape[0] != self.DISPLAY_H:
+            return cv2.resize(self.fail_img, (self.DISPLAY_W, self.DISPLAY_H), interpolation=cv2.INTER_AREA)
+
+        return self.fail_img.copy()
+
+    def draw_fail_transition(self, now_ms):
+        base_frame = self.draw_game_frame()
+        elapsed = now_ms - self.fail_transition_started_ms
+
+        if self.fail_transition_stage == "FADE_OUT":
+            progress = min(max(elapsed / max(1, self.fail_transition_fade_out_ms), 0.0), 1.0)
+            return cv2.addWeighted(base_frame, 1.0 - progress, np.zeros_like(base_frame), progress, 0)
+
+        return self.draw_fail_screen()
 
     def play_intro_video(self):
         if self.intro_played or not os.path.exists(self.intro_video_path):
@@ -227,6 +280,9 @@ class Game:
         )
         draw_health_bar(display_frame, self.player_health.current_hp, self.player_health.max_hp, 40, self.DISPLAY_H - 44, self.DISPLAY_W - 80, 24, (0, 255, 0), label="PLAYER")
 
+        cv2.putText(display_frame, f"score: {self.score}", (20, 70), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(display_frame, f"multiple Rate: x{self.multiplier}", (20, 102), cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 255, 0), 2, cv2.LINE_AA)
+
         if self.dual_attack_mode and hasattr(self.boss_controller, 'attackA'):
             bullet_count = len(self.boss_controller.attackA.bullets)
             cv2.putText(display_frame, f"A bullets: {bullet_count}", (20, self.DISPLAY_H - 70), cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 255, 0), 2, cv2.LINE_AA)
@@ -266,6 +322,11 @@ class Game:
         self.last_player_hit_ms = 0
         self.last_combat_check_ms = 0
         self.mouse_dragging = False
+        self.score = 0
+        self.score_last_tick_ms = 0
+        self.last_damage_taken_ms = 0
+        self.multiplier = 1
+        self.multiplier_next_award_ms = 0
 
     def _sync_weapon_level(self):
         level_to_shots = {1: 1, 2: 2, 3: 4}
@@ -282,6 +343,34 @@ class Game:
 
     def cheat_upgrade_weapon(self):
         self.upgrade_weapon()
+
+    def _reset_multiplier_on_damage(self, now_ms):
+        self.last_damage_taken_ms = now_ms
+        self.multiplier = 1
+        self.multiplier_next_award_ms = now_ms + 10000
+
+    def _update_score_over_time(self, now_ms):
+        if self.state != "RUNNING" or self.player_health.is_empty():
+            return
+
+        if self.score_last_tick_ms == 0:
+            self.score_last_tick_ms = now_ms
+
+        if self.multiplier_next_award_ms == 0:
+            self.multiplier_next_award_ms = now_ms + 10000
+
+        elapsed_ms = now_ms - self.score_last_tick_ms
+        if elapsed_ms >= 1000:
+            gained_seconds = elapsed_ms // 1000
+            self.score += int(gained_seconds * 10 * self.multiplier)
+            self.score_last_tick_ms += gained_seconds * 1000
+
+        while now_ms >= self.multiplier_next_award_ms:
+            self.multiplier += 1
+            self.multiplier_next_award_ms += 10000
+
+    def _add_score_for_damage(self):
+        self.score += int(50 * self.multiplier)
 
     def downgrade_weapon(self):
         if self.weapon_level > 1:
@@ -316,7 +405,11 @@ class Game:
         return (core_x, core_y, core_x + core_w, core_y + core_h)
 
     def handle_combat(self, now_ms):
-        if self.boss_health.is_empty() or self.player_health.is_empty():
+        if self.boss_health.is_empty():
+            return
+
+        if self.player_health.is_empty():
+            self._enter_fail_transition(now_ms)
             return
 
         combat_check_interval_ms = 32
@@ -342,6 +435,7 @@ class Game:
 
             if hit_boss:
                 self.boss_health.take_damage(5)
+                self._add_score_for_damage()
             else:
                 remaining_bullets.append(bullet)
 
@@ -364,6 +458,11 @@ class Game:
             self.player_health.take_damage(10)
             self.downgrade_weapon()
             self.last_player_hit_ms = now_ms
+            self._reset_multiplier_on_damage(now_ms)
+
+        if self.player_health.is_empty():
+            self.state = "FAIL"
+            return
 
         ship_core_rect = self._get_ship_core_rect()
 
@@ -397,6 +496,11 @@ class Game:
                 self.player_health.take_damage(10)
                 self.downgrade_weapon()
                 self.last_player_hit_ms = now_ms
+                self._reset_multiplier_on_damage(now_ms)
+
+            if self.player_health.is_empty():
+                self._enter_fail_transition(now_ms)
+                return
 
         if hasattr(self.boss_controller, 'attackC'):
             zone_hit_player = False
@@ -420,6 +524,11 @@ class Game:
             if zone_hit_player and now_ms - self.last_player_hit_ms >= 500:
                 self.player_health.take_damage(self.player_health.current_hp)
                 self.last_player_hit_ms = now_ms
+                self._reset_multiplier_on_damage(now_ms)
+
+            if self.player_health.is_empty():
+                self._enter_fail_transition(now_ms)
+                return
 
         if self.boss_health.is_empty():
             self.state = "WIN"
@@ -434,6 +543,13 @@ class Game:
             elif self.state == "WIN":
                 bx, by, bw, bh = self.menu_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
+                    self.reset_match()
+                    self.state = "START_MENU"
+            elif self.state == "FAIL":
+                if self._fail_restart_clicked(x, y):
+                    self.reset_match()
+                    self.state = "RUNNING"
+                elif self._fail_menu_clicked(x, y):
                     self.reset_match()
                     self.state = "START_MENU"
             elif self.state == "RUNNING":
@@ -481,15 +597,24 @@ class Game:
 
             if self.state == "RUNNING":
                 self.update_input()
+                self._update_score_over_time(now_ms)
                 self.bullet_controller.update(now_ms)
                 self.item_controller.update(now_ms)
                 self.handle_items()
                 self.handle_combat(now_ms)
+            elif self.state == "FAIL_FADE_OUT":
+                if now_ms - self.fail_transition_started_ms >= self.fail_transition_fade_out_ms:
+                    self.fail_transition_stage = None
+                    self.state = "FAIL"
 
             if self.state == "START_MENU":
                 frame = self.draw_start_menu()
             elif self.state == "WIN":
                 frame = self.draw_win_screen()
+            elif self.state == "FAIL_FADE_OUT":
+                frame = self.draw_fail_transition(now_ms)
+            elif self.state == "FAIL":
+                frame = self.draw_fail_screen()
             else:
                 frame = self.draw_game_frame()
             
