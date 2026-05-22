@@ -68,9 +68,11 @@ class Game:
         self.item_controller = ItemController(self.DISPLAY_W, self.DISPLAY_H)
 
         self.boss_controller = BossController(self.DISPLAY_W, self.DISPLAY_H)
-        self.boss_health = HealthMeter(3000)
+        # Boss has a large HP pool and is split evenly into three phases
+        self.boss_health = HealthMeter(9999)
         self.player_health = HealthMeter(100)
         self.last_player_hit_ms = 0
+        self.last_combat_check_ms = 0
         self.mouse_dragging = False
         self.drag_offset_x = 0
         self.drag_offset_y = 0
@@ -107,11 +109,8 @@ class Game:
         return background
 
     def draw_start_menu(self):
-        # 1. 取得當前捲動背景畫面 (原解析度)
-        frame = self.background.get_frame()
-        
-        # 放大顯示畫面
-        display_frame = cv2.resize(frame, (self.DISPLAY_W, self.DISPLAY_H), interpolation=cv2.INTER_NEAREST)
+        # 使用背景快取的顯示尺寸畫面，避免每幀重新 resize
+        display_frame = self.background.get_display_frame()
 
         # 2. 顯示 boss 與玩家船隻
         display_frame = self.boss_controller.draw_body(display_frame)
@@ -134,8 +133,7 @@ class Game:
         return display_frame
 
     def draw_win_screen(self):
-        frame = self.background.get_frame()
-        display_frame = cv2.resize(frame, (self.DISPLAY_W, self.DISPLAY_H), interpolation=cv2.INTER_NEAREST)
+        display_frame = self.background.get_display_frame()
 
         dark_overlay = np.zeros_like(display_frame)
         display_frame = cv2.addWeighted(display_frame, 0.35, dark_overlay, 0.65, 0)
@@ -151,8 +149,7 @@ class Game:
         return display_frame
 
     def draw_game_frame(self):
-        frame = self.background.get_frame()
-        display_frame = cv2.resize(frame, (self.DISPLAY_W, self.DISPLAY_H), interpolation=cv2.INTER_NEAREST)
+        display_frame = self.background.get_display_frame()
 
         if not self.boss_health.is_empty():
             display_frame = self.boss_controller.draw_body(display_frame)
@@ -162,13 +159,15 @@ class Game:
         if not self.boss_health.is_empty():
             display_frame = self.boss_controller.draw_attacks(display_frame)
 
-        draw_segmented_health_bar(display_frame, self.boss_health.current_hp, self.boss_health.max_hp, 40, 20, 1000, 180, 24, (0, 0, 255), label="BOSS")
+        # show segmented bar with segments equal to one third of boss max HP
+        segment_hp = max(1, self.boss_health.max_hp // 3)
+        draw_segmented_health_bar(display_frame, self.boss_health.current_hp, self.boss_health.max_hp, 40, 20, segment_hp, 180, 24, (0, 0, 255), label="BOSS")
         draw_health_bar(display_frame, self.player_health.current_hp, self.player_health.max_hp, 40, self.DISPLAY_H - 44, self.DISPLAY_W - 80, 24, (0, 255, 0), label="PLAYER")
         return display_frame
 
     def reset_match(self):
         self.boss_controller.reset()
-        self.boss_health = HealthMeter(3000)
+        self.boss_health = HealthMeter(9999)
         self.player_health = HealthMeter(100)
         self.ship_controller.reset()
         self.weapon_level = 1
@@ -177,6 +176,7 @@ class Game:
         self.bullet_controller.last_fire_time = 0
         self.item_controller.reset()
         self.last_player_hit_ms = 0
+        self.last_combat_check_ms = 0
         self.mouse_dragging = False
 
     def _sync_weapon_level(self):
@@ -224,6 +224,11 @@ class Game:
     def handle_combat(self, now_ms):
         if self.boss_health.is_empty() or self.player_health.is_empty():
             return
+
+        combat_check_interval_ms = 32
+        if now_ms - self.last_combat_check_ms < combat_check_interval_ms:
+            return
+        self.last_combat_check_ms = now_ms
 
         boss_x, boss_y, boss_w, boss_h = self.boss_controller.get_rect()
         boss_rect = (boss_x, boss_y, boss_x + boss_w, boss_y + boss_h)
@@ -367,9 +372,12 @@ class Game:
                 self.boss_controller.update(now_ms)
                 boss_rect = self.boss_controller.get_rect()
                 bhp = self.boss_health.current_hp
-                if bhp > 2000:
+                max_hp = self.boss_health.max_hp
+                # split boss HP into three equal phases
+                third = max_hp / 3.0
+                if bhp > 2 * third:
                     phase = 1
-                elif bhp > 1000:
+                elif bhp > third:
                     phase = 2
                 else:
                     phase = 3

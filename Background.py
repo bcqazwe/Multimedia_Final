@@ -31,18 +31,28 @@ class BackgroundScroller:
         self.map_h = self.map_img.shape[0]
         self.current_y = self.map_h
         self.center_x = max((self.map_img.shape[1] - self.window_w) // 2, 0)
+        self._display_cache = None
+        self._cache_dirty = True
+        self._rebuild_display_cache()
 
     def get_frame(self):
         return self.scrolling_map[self.current_y:self.current_y + self.window_h, self.center_x:self.center_x + self.window_w].copy()
+
+    def _rebuild_display_cache(self):
+        frame = self.get_frame()
+        self._display_cache = cv2.resize(frame, (self.window_w * 2, self.window_h * 2), interpolation=cv2.INTER_NEAREST)
+        self._cache_dirty = False
+
+    def get_display_frame(self):
+        if self._cache_dirty or self._display_cache is None:
+            self._rebuild_display_cache()
+        return self._display_cache.copy()
 
     def update(self):
         self.current_y -= self.scroll_speed
         if self.current_y <= 0:
             self.current_y = self.map_h
-
-    def get_display_frame(self):
-        frame = self.get_frame()
-        return cv2.resize(frame, (self.window_w * 2, self.window_h * 2), interpolation=cv2.INTER_NEAREST)
+        self._rebuild_display_cache()
 
 
 if __name__ == '__main__':

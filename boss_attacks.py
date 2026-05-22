@@ -70,9 +70,17 @@ class BossAttackA:
 
         # Slightly larger sizes for better visibility
         self.straight_img = cv2.resize(straight, (28, 52), interpolation=cv2.INTER_AREA)
-        self.dot_img = cv2.resize(dot, (18, 18), interpolation=cv2.INTER_AREA)
+        self.dot_img = cv2.resize(dot, (24, 24), interpolation=cv2.INTER_AREA)
+        self.straight_rgb = self.straight_img[:, :, :3]
+        self.straight_mask = self.straight_img[:, :, 3:] / 255.0
+        self.dot_rgb = self.dot_img[:, :, :3]
+        self.dot_mask = self.dot_img[:, :, 3:] / 255.0
 
         self.bullets = []
+        # bullet object pool
+        self._pool = []
+        for _ in range(256):
+            self._pool.append({'x': 0.0, 'y': 0.0, 'vx': 0.0, 'vy': 0.0, 'img': self.dot_img})
 
         # State machine for attack sequence
         self.state = 'idle'  # idle, windup, attack, cooldown
@@ -90,9 +98,9 @@ class BossAttackA:
 
         # per-attack configuration
         self.attack_configs = {
-            'straight': {'windup': 450, 'duration': 260, 'cooldown': 1200, 'interval': 160},
-            'cross': {'windup': 400, 'duration': 700, 'cooldown': 400, 'interval': 140},
-            'homing': {'windup': 200, 'duration': 500, 'cooldown': 300, 'interval': 120},
+            'straight': {'windup': 450, 'duration': 300, 'cooldown': 1100, 'interval': 120},
+            'cross': {'windup': 400, 'duration': 780, 'cooldown': 360, 'interval': 100},
+            'homing': {'windup': 200, 'duration': 560, 'cooldown': 260, 'interval': 90},
         }
 
         # runtime timers for spawning during attack
@@ -138,8 +146,9 @@ class BossAttackA:
 
         elif self.state == 'attack':
             # spawn at configured interval (may use phase to scale intensity)
-            spawn_interval = max(40, int(config['interval'] / max(1, phase)))
-            should_spawn = (phase == 1 and not self.attack_fired) or (phase > 1 and now_ms - self.last_spawn >= spawn_interval)
+            phase_interval_scale = {1: 1.0, 2: 0.85, 3: 0.72}
+            spawn_interval = max(28, int(config['interval'] * phase_interval_scale.get(phase, 1.0)))
+            should_spawn = now_ms - self.last_spawn >= spawn_interval
             if should_spawn:
                 # spawn according to attack type
                 if self.current_attack == 'straight':
@@ -171,51 +180,118 @@ class BossAttackA:
             b['x'] += b['vx']
             b['y'] += b['vy']
 
-        # cull off-screen
-        self.bullets = [b for b in self.bullets if -64 < b['x'] < self.display_w + 64 and -64 < b['y'] < self.display_h + 64]
+        # cull off-screen early and recycle to pool
+        margin = 24
+        keep = []
+        for b in self.bullets:
+            if -margin < b['x'] < self.display_w + margin and -margin < b['y'] < self.display_h + margin:
+                keep.append(b)
+            else:
+                if len(self._pool) < 1024:
+                    # normalize fields and return to pool (keep img pointer)
+                    self._pool.append({'x': 0.0, 'y': 0.0, 'vx': 0.0, 'vy': 0.0, 'img': b.get('img', self.dot_img)})
+        self.bullets = keep
 
     def draw(self, frame):
         for b in self.bullets:
             img = b.get('img')
             if img is None:
                 continue
-            frame = _overlay_image(frame, img, int(b['x']), int(b['y']))
+            if img is self.straight_img:
+                frame = self._overlay_cached_image(frame, self.straight_rgb, self.straight_mask, int(b['x']), int(b['y']))
+            else:
+                frame = self._overlay_cached_image(frame, self.dot_rgb, self.dot_mask, int(b['x']), int(b['y']))
         return frame
+
+    def _overlay_cached_image(self, background, overlay_img, overlay_mask, x, y):
+        h, w = overlay_mask.shape[:2]
+        if x >= background.shape[1] or y >= background.shape[0] or x + w <= 0 or y + h <= 0:
+            return background
+
+        x1 = max(x, 0)
+        y1 = max(y, 0)
+        x2 = min(x + w, background.shape[1])
+        y2 = min(y + h, background.shape[0])
+
+        overlay_x1 = x1 - x
+        overlay_y1 = y1 - y
+        overlay_x2 = overlay_x1 + (x2 - x1)
+        overlay_y2 = overlay_y1 + (y2 - y1)
+
+        roi = background[y1:y2, x1:x2]
+        overlay_roi = overlay_img[overlay_y1:overlay_y2, overlay_x1:overlay_x2]
+        mask_roi = overlay_mask[overlay_y1:overlay_y2, overlay_x1:overlay_x2]
+
+        overlay_f = overlay_roi.astype('float32')
+        roi_f = roi.astype('float32')
+        mask_f = mask_roi.astype('float32')
+        # ensure mask has same number of channels as overlay
+        if mask_f.ndim == 2:
+            mask_f = mask_f[:, :, None]
+        if mask_f.shape[2] != overlay_f.shape[2]:
+            mask_f = np.repeat(mask_f, overlay_f.shape[2], axis=2)
+        inv_mask_f = 1.0 - mask_f
+
+        fg = cv2.multiply(overlay_f, mask_f)
+        bg = cv2.multiply(roi_f, inv_mask_f)
+        res = cv2.add(fg, bg)
+        background[y1:y2, x1:x2] = res.astype('uint8')
+        return background
 
     def _spawn_straight(self, boss_x, boss_y, boss_w, boss_h, phase):
         # spawn N bullets across boss width, shoot down
-        counts = {1: 3, 2: 5, 3: 7}
+        counts = {1: 4, 2: 7, 3: 9}
         n = counts.get(phase, 3)
         spacing = max(28, boss_w // max(1, n - 1))
-        speed = 3 + phase * 2
+        speed = {1: 8, 2: 11, 3: 14}.get(phase, 8)
         for i in range(n):
             x = boss_x + (boss_w - self.straight_img.shape[1]) // 2 + int((i - (n - 1) / 2) * spacing)
             y = boss_y + boss_h
-            self.bullets.append({'x': x, 'y': y, 'vx': 0, 'vy': speed, 'img': self.straight_img})
+            if self._pool:
+                b = self._pool.pop()
+                b['x'] = float(x)
+                b['y'] = float(y)
+                b['vx'] = 0.0
+                b['vy'] = float(speed)
+                b['img'] = self.straight_img
+                self.bullets.append(b)
+            else:
+                self.bullets.append({'x': float(x), 'y': float(y), 'vx': 0.0, 'vy': float(speed), 'img': self.straight_img})
 
     def _spawn_cross_fan(self, boss_x, boss_y, boss_w, boss_h, phase):
         # spawn two opposite fans from left and right
-        per_fan = {1: 5, 2: 7, 3: 9}[phase]
-        speed = 4 + phase * 2
+        per_fan = {1: 7, 2: 10, 3: 12}[phase]
+        speed = {1: 8, 2: 11, 3: 14}[phase]
         fan_spread = math.radians(92)
+        fan_bias = math.radians(18)
         for side in (-1, 1):
             cx = boss_x + (0 if side < 0 else boss_w)
             cy = boss_y + boss_h
             for i in range(per_fan):
                 t = i / max(1, per_fan - 1)
-                angle = (-fan_spread/2) + t * fan_spread
+                angle = (-fan_spread / 2) + t * fan_spread + fan_bias
                 # flip angle for right side
                 if side > 0:
                     angle = math.pi - angle
                 vx = math.cos(angle) * speed
                 vy = math.sin(angle) * speed
-                self.bullets.append({'x': cx, 'y': cy, 'vx': vx, 'vy': vy, 'img': self.dot_img})
+                if self._pool:
+                    b = self._pool.pop()
+                    b['x'] = float(cx)
+                    b['y'] = float(cy)
+                    b['vx'] = float(vx)
+                    b['vy'] = float(vy)
+                    b['img'] = self.dot_img
+                    self.bullets.append(b)
+                else:
+                    self.bullets.append({'x': float(cx), 'y': float(cy), 'vx': float(vx), 'vy': float(vy), 'img': self.dot_img})
 
     def _spawn_homing(self, boss_cx, boss_cy, player_pos, phase):
         # spawn fast small dots that head toward player_pos
         if player_pos is None:
             # fallback: shoot downward
-            vx, vy = 0, 8 + phase * 2
+            vy = {1: 13, 2: 16, 3: 19}.get(phase, 13)
+            vx = 0
             print(f"BossAttackA: homing fallback spawn speed={vy}")
             self.bullets.append({'x': boss_cx, 'y': boss_cy, 'vx': vx, 'vy': vy, 'img': self.dot_img})
             return
@@ -224,11 +300,11 @@ class BossAttackA:
         dx = px - boss_cx
         dy = py - boss_cy
         dist = math.hypot(dx, dy) or 1.0
-        speed = 8 + phase * 3
+        speed = {1: 13, 2: 16, 3: 19}.get(phase, 13)
         vx = dx / dist * speed
         vy = dy / dist * speed
         # spawn a small burst
-        for off in (-28, 0, 28):
+        for off in (-40, -20, 0, 20, 40):
             self.bullets.append({'x': boss_cx + off, 'y': boss_cy, 'vx': vx, 'vy': vy, 'img': self.dot_img})
 
 
@@ -260,6 +336,10 @@ class BossAttackC:
 
         self.warning_img = cv2.resize(lockdown, (90, 90), interpolation=cv2.INTER_AREA)
         self.rocket_img = cv2.resize(rocket, (46, 92), interpolation=cv2.INTER_AREA)
+        self.warning_rgb = self.warning_img[:, :, :3]
+        self.warning_mask = self.warning_img[:, :, 3:] / 255.0
+        self.rocket_rgb = self.rocket_img[:, :, :3]
+        self.rocket_mask = self.rocket_img[:, :, 3:] / 255.0
 
         self.damage_zones = []
         self.warning_line_x = None
@@ -279,7 +359,7 @@ class BossAttackC:
         }
 
         self.attack_configs = {
-            'vertical_missile': {'windup': 5000, 'cycle': 20000, 'speed': 30},
+            'vertical_missile': {'windup': 5000, 'cycle': 20000, 'speed': 36},
         }
 
     def reset(self):
@@ -320,11 +400,12 @@ class BossAttackC:
                 rocket_w = self.rocket_img.shape[1]
                 rocket_h = self.rocket_img.shape[0]
                 rocket_x = max(0, min(self.warning_line_x - rocket_w // 2, self.display_w - rocket_w))
+                speed = float(config['speed'] + phase * 4)
                 self.active_rocket = {
                     'x': float(rocket_x),
                     'y': float(-rocket_h),
                     'vx': 0.0,
-                    'vy': float(config['speed']),
+                    'vy': speed,
                     'img': self.rocket_img,
                 }
                 self.warning_line_x = None
@@ -369,12 +450,47 @@ class BossAttackC:
             cv2.line(frame, (line_x, 0), (line_x, self.display_h - 1), (0, 0, 255), 4)
 
         if self.warning_icon is not None:
-            frame = _overlay_image(frame, self.warning_icon['img'], int(self.warning_icon['x']), int(self.warning_icon['y']))
+            frame = self._overlay_cached_image(frame, self.warning_rgb, self.warning_mask, int(self.warning_icon['x']), int(self.warning_icon['y']))
 
         if self.active_rocket is not None:
-            frame = _overlay_image(frame, self.active_rocket['img'], int(self.active_rocket['x']), int(self.active_rocket['y']))
+            frame = self._overlay_cached_image(frame, self.rocket_rgb, self.rocket_mask, int(self.active_rocket['x']), int(self.active_rocket['y']))
 
         return frame
+
+    def _overlay_cached_image(self, background, overlay_img, overlay_mask, x, y):
+        h, w = overlay_mask.shape[:2]
+        if x >= background.shape[1] or y >= background.shape[0] or x + w <= 0 or y + h <= 0:
+            return background
+
+        x1 = max(x, 0)
+        y1 = max(y, 0)
+        x2 = min(x + w, background.shape[1])
+        y2 = min(y + h, background.shape[0])
+
+        overlay_x1 = x1 - x
+        overlay_y1 = y1 - y
+        overlay_x2 = overlay_x1 + (x2 - x1)
+        overlay_y2 = overlay_y1 + (y2 - y1)
+
+        roi = background[y1:y2, x1:x2]
+        overlay_roi = overlay_img[overlay_y1:overlay_y2, overlay_x1:overlay_x2]
+        mask_roi = overlay_mask[overlay_y1:overlay_y2, overlay_x1:overlay_x2]
+
+        overlay_f = overlay_roi.astype('float32')
+        roi_f = roi.astype('float32')
+        mask_f = mask_roi.astype('float32')
+        # ensure mask has same number of channels as overlay
+        if mask_f.ndim == 2:
+            mask_f = mask_f[:, :, None]
+        if mask_f.shape[2] != overlay_f.shape[2]:
+            mask_f = np.repeat(mask_f, overlay_f.shape[2], axis=2)
+        inv_mask_f = 1.0 - mask_f
+
+        fg = cv2.multiply(overlay_f, mask_f)
+        bg = cv2.multiply(roi_f, inv_mask_f)
+        res = cv2.add(fg, bg)
+        background[y1:y2, x1:x2] = res.astype('uint8')
+        return background
 
     def get_damage_zones(self):
         return list(self.damage_zones)

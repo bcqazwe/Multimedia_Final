@@ -76,6 +76,10 @@ class BulletController:
 		self.shot_spacing = 12
 		self.last_fire_time = 0
 		self.bullets = []
+		# object pool for bullets to avoid frequent allocations
+		self._pool = []
+		for _ in range(self.max_bullets):
+			self._pool.append({"x": 0, "y": 0})
 
 		if bullet_img is None:
 			bullet_img = imread_unicode(asset_path('player_bullet_stage1.png'), cv2.IMREAD_UNCHANGED)
@@ -85,6 +89,8 @@ class BulletController:
 			bullet_img[:, :, 3] = 255
 
 		self.bullet_img = bullet_img
+		self.bullet_rgb = self.bullet_img[:, :, :3]
+		self.bullet_mask = self.bullet_img[:, :, 3:] / 255.0
 
 	def is_key_pressed(self, virtual_key_code):
 		return ctypes.windll.user32.GetAsyncKeyState(virtual_key_code) & 0x8000 != 0
@@ -108,29 +114,49 @@ class BulletController:
 		center_x = self.ship_controller.x + (self.ship_controller.ship_w - bullet_w) // 2
 
 		for offset_x in self._get_shot_offsets():
-			self.bullets.append({"x": center_x + offset_x, "y": y})
+			if self._pool:
+				b = self._pool.pop()
+				b["x"] = center_x + offset_x
+				b["y"] = y
+				self.bullets.append(b)
+			else:
+				self.bullets.append({"x": center_x + offset_x, "y": y})
 		self.last_fire_time = now_ms
 
 	def update(self, now_ms):
 		self.fire(now_ms)
 
+		# move bullets
 		for bullet in self.bullets:
 			bullet["y"] -= self.speed
 
-		self.bullets = [bullet for bullet in self.bullets if bullet["y"] + self.bullet_img.shape[0] > 0]
+		# early cull: recycle bullets that are well off-screen
+		h = self.bullet_img.shape[0]
+		w = self.bullet_img.shape[1]
+		margin = 24
+		keep = []
+		for bullet in self.bullets:
+			x = bullet["x"]
+			y = bullet["y"]
+			if -margin < x < self.display_w + margin and -margin < y < self.display_h + margin:
+				keep.append(bullet)
+			else:
+				# recycle
+				if len(self._pool) < self.max_bullets:
+					self._pool.append(bullet)
+				# else drop
+
+		self.bullets = keep
 
 	def draw(self, frame):
 		for bullet in self.bullets:
-			frame = self._overlay_image(frame, self.bullet_img, bullet["x"], bullet["y"])
+			frame = self._overlay_cached_image(frame, bullet["x"], bullet["y"])
 		return frame
 
-	def _overlay_image(self, background, overlay, x, y):
-		h, w = overlay.shape[:2]
+	def _overlay_cached_image(self, background, x, y):
+		h, w = self.bullet_img.shape[:2]
 		if x >= background.shape[1] or y >= background.shape[0] or x + w <= 0 or y + h <= 0:
 			return background
-
-		overlay_img = overlay[:, :, :3]
-		overlay_mask = overlay[:, :, 3:] / 255.0
 
 		x1 = max(x, 0)
 		y1 = max(y, 0)
@@ -143,8 +169,23 @@ class BulletController:
 		overlay_y2 = overlay_y1 + (y2 - y1)
 
 		roi = background[y1:y2, x1:x2]
-		overlay_roi = overlay_img[overlay_y1:overlay_y2, overlay_x1:overlay_x2]
-		mask_roi = overlay_mask[overlay_y1:overlay_y2, overlay_x1:overlay_x2]
+		overlay_roi = self.bullet_rgb[overlay_y1:overlay_y2, overlay_x1:overlay_x2]
+		mask_roi = self.bullet_mask[overlay_y1:overlay_y2, overlay_x1:overlay_x2]
 
-		background[y1:y2, x1:x2] = (1.0 - mask_roi) * roi + mask_roi * overlay_roi
+		# use OpenCV multiply/add to leverage C implementations
+		# ensure float32 for correct multiplication
+		overlay_f = overlay_roi.astype('float32')
+		roi_f = roi.astype('float32')
+		mask_f = mask_roi.astype('float32')
+		# ensure mask has same number of channels as overlay
+		if mask_f.ndim == 2:
+			mask_f = mask_f[:, :, None]
+		if mask_f.shape[2] != overlay_f.shape[2]:
+			mask_f = np.repeat(mask_f, overlay_f.shape[2], axis=2)
+		inv_mask_f = 1.0 - mask_f
+
+		fg = cv2.multiply(overlay_f, mask_f)
+		bg = cv2.multiply(roi_f, inv_mask_f)
+		res = cv2.add(fg, bg)
+		background[y1:y2, x1:x2] = res.astype('uint8')
 		return background

@@ -41,6 +41,8 @@ class BossController:
 		scale = width / self.boss_img.shape[1]
 		height = max(1, int(self.boss_img.shape[0] * scale))
 		self.boss_img = cv2.resize(self.boss_img, (width, height), interpolation=cv2.INTER_NEAREST)
+		self.boss_rgb = self.boss_img[:, :, :3]
+		self.boss_mask = self.boss_img[:, :, 3:] / 255.0
 
 		self.boss_w = self.boss_img.shape[1]
 		self.boss_h = self.boss_img.shape[0]
@@ -81,20 +83,17 @@ class BossController:
 		return frame
 
 	def draw_body(self, frame):
-		return self._overlay_image(frame, self.boss_img, self.x, self.y)
+		return self._overlay_cached_image(frame, self.boss_rgb, self.boss_mask, self.x, self.y)
 
 	def draw_attacks(self, frame):
 		frame = self.attackA.draw(frame)
 		frame = self.attackC.draw(frame)
 		return frame
 
-	def _overlay_image(self, background, overlay, x, y):
-		h, w = overlay.shape[:2]
+	def _overlay_cached_image(self, background, overlay_img, overlay_mask, x, y):
+		h, w = overlay_mask.shape[:2]
 		if x >= background.shape[1] or y >= background.shape[0] or x + w <= 0 or y + h <= 0:
 			return background
-
-		overlay_img = overlay[:, :, :3]
-		overlay_mask = overlay[:, :, 3:] / 255.0
 
 		x1 = max(x, 0)
 		y1 = max(y, 0)
@@ -110,5 +109,19 @@ class BossController:
 		overlay_roi = overlay_img[overlay_y1:overlay_y2, overlay_x1:overlay_x2]
 		mask_roi = overlay_mask[overlay_y1:overlay_y2, overlay_x1:overlay_x2]
 
-		background[y1:y2, x1:x2] = (1.0 - mask_roi) * roi + mask_roi * overlay_roi
+		# use OpenCV operations for faster C-level blending
+		overlay_f = overlay_roi.astype('float32')
+		roi_f = roi.astype('float32')
+		mask_f = mask_roi.astype('float32')
+		# ensure mask has same number of channels as overlay
+		if mask_f.ndim == 2:
+			mask_f = mask_f[:, :, None]
+		if mask_f.shape[2] != overlay_f.shape[2]:
+			mask_f = np.repeat(mask_f, overlay_f.shape[2], axis=2)
+		inv_mask_f = 1.0 - mask_f
+
+		fg = cv2.multiply(overlay_f, mask_f)
+		bg = cv2.multiply(roi_f, inv_mask_f)
+		res = cv2.add(fg, bg)
+		background[y1:y2, x1:x2] = res.astype('uint8')
 		return background
