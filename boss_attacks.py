@@ -89,11 +89,19 @@ class BossAttackA:
         self.attack_index = 0
         self.attack_fired = False
 
-        # default sequences per phase (lists of attack types)
+        # attack order is shared by all phases; phase only changes parameters
+        self.attack_order = ['straight', 'cross', 'homing', 'bidir_bounce']
         self.phase_sequences = {
-            1: ['straight'],
-            2: ['straight', 'cross'],
-            3: ['cross', 'homing', 'straight'],
+            1: list(self.attack_order),
+            2: list(self.attack_order),
+            3: list(self.attack_order),
+        }
+
+        # phase tuning only affects speed/angle/duration feel, not which attacks exist
+        self.phase_profiles = {
+            1: {'speed_scale': 0.90, 'angle_scale': 1.15, 'damage_scale': 1.00},
+            2: {'speed_scale': 1.00, 'angle_scale': 1.00, 'damage_scale': 1.20},
+            3: {'speed_scale': 1.15, 'angle_scale': 0.82, 'damage_scale': 1.45},
         }
 
         # per-attack configuration
@@ -101,6 +109,9 @@ class BossAttackA:
             'straight': {'windup': 450, 'duration': 300, 'cooldown': 1100, 'interval': 120},
             'cross': {'windup': 400, 'duration': 780, 'cooldown': 360, 'interval': 100},
             'homing': {'windup': 200, 'duration': 560, 'cooldown': 260, 'interval': 90},
+            # bidir_bounce: shoots left and right; bullets reflect on side boundaries
+            # two lateral lanes keep firing for 3 seconds so the pressure window feels sustained
+            'bidir_bounce': {'windup': 300, 'duration': 3000, 'cooldown': 400, 'interval': 110, 'max_bounces': 2, 'loss_factor': 0.96},
         }
 
         # runtime timers for spawning during attack
@@ -121,6 +132,7 @@ class BossAttackA:
         boss_cy = boss_y + boss_h // 2
 
         seq = self.phase_sequences.get(phase, ['straight'])
+        profile = self.phase_profiles.get(phase, self.phase_profiles[1])
 
         # state transitions
         if self.state == 'idle':
@@ -131,7 +143,7 @@ class BossAttackA:
             self.last_spawn = now_ms
             self.attack_fired = False
             # debug
-            print(f"BossAttackA: enter windup {self.current_attack} phase={phase} time={now_ms}")
+            #print(f"BossAttackA: enter windup {self.current_attack} phase={phase} time={now_ms}")
             return
 
         config = self.attack_configs.get(self.current_attack, self.attack_configs['straight'])
@@ -142,28 +154,31 @@ class BossAttackA:
                 self.state = 'attack'
                 self.state_enter_ms = now_ms
                 self.last_spawn = now_ms
-                print(f"BossAttackA: start attack {self.current_attack} phase={phase} time={now_ms}")
+                #print(f"BossAttackA: start attack {self.current_attack} phase={phase} time={now_ms}")
 
         elif self.state == 'attack':
             # spawn at configured interval (may use phase to scale intensity)
-            phase_interval_scale = {1: 1.0, 2: 0.85, 3: 0.72}
+            # slightly increase attack frequency (interval scale < 1 -> faster)
+            phase_interval_scale = {1: 0.95, 2: 0.80, 3: 0.65}
             spawn_interval = max(28, int(config['interval'] * phase_interval_scale.get(phase, 1.0)))
             should_spawn = now_ms - self.last_spawn >= spawn_interval
             if should_spawn:
                 # spawn according to attack type
                 if self.current_attack == 'straight':
-                    self._spawn_straight(boss_x, boss_y, boss_w, boss_h, phase)
+                    self._spawn_straight(boss_x, boss_y, boss_w, boss_h, phase, profile)
                 elif self.current_attack == 'cross':
-                    self._spawn_cross_fan(boss_x, boss_y, boss_w, boss_h, phase)
+                    self._spawn_cross_fan(boss_x, boss_y, boss_w, boss_h, phase, profile)
                 elif self.current_attack == 'homing':
-                    self._spawn_homing(boss_cx, boss_cy, player_pos, phase)
+                    self._spawn_homing(boss_cx, boss_cy, player_pos, phase, profile)
+                elif self.current_attack == 'bidir_bounce':
+                    self._spawn_bidir_bounce(boss_x, boss_y, boss_w, boss_h, phase, profile)
                 self.last_spawn = now_ms
                 self.attack_fired = True
 
             if elapsed >= config['duration']:
                 self.state = 'cooldown'
                 self.state_enter_ms = now_ms
-                print(f"BossAttackA: enter cooldown {self.current_attack} phase={phase} time={now_ms}")
+                #print(f"BossAttackA: enter cooldown {self.current_attack} phase={phase} time={now_ms}")
 
         elif self.state == 'cooldown':
             if elapsed >= config['cooldown']:
@@ -173,24 +188,101 @@ class BossAttackA:
                 self.state = 'idle'
                 self.state_enter_ms = now_ms
                 self.attack_fired = False
-                print(f"BossAttackA: cooldown end, next index={self.attack_index} time={now_ms}")
+                #print(f"BossAttackA: cooldown end, next index={self.attack_index} time={now_ms}")
 
         # update bullets positions
         for b in self.bullets:
             b['x'] += b['vx']
             b['y'] += b['vy']
 
-        # cull off-screen early and recycle to pool
+        # cull off-screen early; handle horizontal reflection if bullet still allowed to bounce
         margin = 24
         keep = []
         for b in self.bullets:
-            if -margin < b['x'] < self.display_w + margin and -margin < b['y'] < self.display_h + margin:
+            bw = b.get('img').shape[1] if b.get('img') is not None else 8
+            bh = b.get('img').shape[0] if b.get('img') is not None else 8
+
+            # horizontal boundary reflection
+            bx = b['x']
+            by = b['y']
+            bounces = b.get('bounces', 0)
+            max_bounces = b.get('max_bounces', 0)
+            loss = b.get('loss_factor', 0.96)
+
+            reflected = False
+            # left side
+            if bx < 0:
+                if bounces < max_bounces:
+                    # clamp and reflect
+                    b['x'] = 0.0
+                    b['vx'] = -b['vx'] * loss
+                    b['bounces'] = bounces + 1
+                    reflected = True
+                else:
+                    # no more bounces, let it be culled below
+                    pass
+
+            # right side
+            if bx + bw > self.display_w:
+                if bounces < max_bounces:
+                    b['x'] = float(max(0, self.display_w - bw))
+                    b['vx'] = -b['vx'] * loss
+                    b['bounces'] = bounces + 1
+                    reflected = True
+                else:
+                    pass
+
+            # if reflected or still within extended margin, keep; else recycle
+            if reflected or (-margin < b['x'] < self.display_w + margin and -margin < b['y'] < self.display_h + margin):
                 keep.append(b)
             else:
                 if len(self._pool) < 1024:
-                    # normalize fields and return to pool (keep img pointer)
                     self._pool.append({'x': 0.0, 'y': 0.0, 'vx': 0.0, 'vy': 0.0, 'img': b.get('img', self.dot_img)})
         self.bullets = keep
+
+    def _spawn_bidir_bounce(self, boss_x, boss_y, boss_w, boss_h, phase, profile=None):
+        # spawn one left lane and one right lane; repeated spawns over time form two long lines
+        profile = profile or self.phase_profiles.get(phase, self.phase_profiles[1])
+        speed = {1: 12, 2: 18, 3: 26}.get(phase, 12) * profile['speed_scale']
+        max_bounces = {1: 1, 2: 2, 3: 3}.get(phase, 1)
+        loss = {1: 0.98, 2: 0.96, 3: 0.94}.get(phase, 0.96)
+        vertical_scale = {1: 0.55, 2: 0.40, 3: 0.25}.get(phase, 0.55) * profile['angle_scale']
+        x = boss_x + (boss_w - self.dot_img.shape[1]) // 2
+        y = boss_y + boss_h
+
+        # left-going lane
+        vx_l = -abs(speed * 0.75)
+        vy_l = speed * vertical_scale
+        if self._pool:
+            b = self._pool.pop()
+            b['x'] = float(x)
+            b['y'] = float(y)
+            b['vx'] = float(vx_l)
+            b['vy'] = float(vy_l)
+            b['img'] = self.dot_img
+            b['bounces'] = 0
+            b['max_bounces'] = max_bounces
+            b['loss_factor'] = loss
+            self.bullets.append(b)
+        else:
+            self.bullets.append({'x': float(x), 'y': float(y), 'vx': float(vx_l), 'vy': float(vy_l), 'img': self.dot_img, 'bounces': 0, 'max_bounces': max_bounces, 'loss_factor': loss})
+
+        # right-going lane
+        vx_r = abs(speed * 0.75)
+        vy_r = speed * vertical_scale
+        if self._pool:
+            b = self._pool.pop()
+            b['x'] = float(x)
+            b['y'] = float(y)
+            b['vx'] = float(vx_r)
+            b['vy'] = float(vy_r)
+            b['img'] = self.dot_img
+            b['bounces'] = 0
+            b['max_bounces'] = max_bounces
+            b['loss_factor'] = loss
+            self.bullets.append(b)
+        else:
+            self.bullets.append({'x': float(x), 'y': float(y), 'vx': float(vx_r), 'vy': float(vy_r), 'img': self.dot_img, 'bounces': 0, 'max_bounces': max_bounces, 'loss_factor': loss})
 
     def draw(self, frame):
         for b in self.bullets:
@@ -238,12 +330,14 @@ class BossAttackA:
         background[y1:y2, x1:x2] = res.astype('uint8')
         return background
 
-    def _spawn_straight(self, boss_x, boss_y, boss_w, boss_h, phase):
+    def _spawn_straight(self, boss_x, boss_y, boss_w, boss_h, phase, profile=None):
         # spawn N bullets across boss width, shoot down
+        profile = profile or self.phase_profiles.get(phase, self.phase_profiles[1])
         counts = {1: 4, 2: 7, 3: 9}
         n = counts.get(phase, 3)
         spacing = max(28, boss_w // max(1, n - 1))
-        speed = {1: 8, 2: 11, 3: 14}.get(phase, 8)
+        # increased speeds (approx 1.5x) while keeping spawn counts unchanged
+        speed = {1: 12, 2: 16, 3: 21}.get(phase, 12) * profile['speed_scale']
         for i in range(n):
             x = boss_x + (boss_w - self.straight_img.shape[1]) // 2 + int((i - (n - 1) / 2) * spacing)
             y = boss_y + boss_h
@@ -258,12 +352,14 @@ class BossAttackA:
             else:
                 self.bullets.append({'x': float(x), 'y': float(y), 'vx': 0.0, 'vy': float(speed), 'img': self.straight_img})
 
-    def _spawn_cross_fan(self, boss_x, boss_y, boss_w, boss_h, phase):
+    def _spawn_cross_fan(self, boss_x, boss_y, boss_w, boss_h, phase, profile=None):
         # spawn two opposite fans from left and right
+        profile = profile or self.phase_profiles.get(phase, self.phase_profiles[1])
         per_fan = {1: 7, 2: 10, 3: 12}[phase]
-        speed = {1: 8, 2: 11, 3: 14}[phase]
-        fan_spread = math.radians(92)
-        fan_bias = math.radians(18)
+        # increased speeds for fan bullets
+        speed = {1: 12, 2: 16, 3: 21}[phase] * profile['speed_scale']
+        fan_spread = math.radians(92) * profile['angle_scale']
+        fan_bias = math.radians(18) * profile['angle_scale']
         for side in (-1, 1):
             cx = boss_x + (0 if side < 0 else boss_w)
             cy = boss_y + boss_h
@@ -286,13 +382,13 @@ class BossAttackA:
                 else:
                     self.bullets.append({'x': float(cx), 'y': float(cy), 'vx': float(vx), 'vy': float(vy), 'img': self.dot_img})
 
-    def _spawn_homing(self, boss_cx, boss_cy, player_pos, phase):
+    def _spawn_homing(self, boss_cx, boss_cy, player_pos, phase, profile=None):
         # spawn fast small dots that head toward player_pos
+        profile = profile or self.phase_profiles.get(phase, self.phase_profiles[1])
         if player_pos is None:
-            # fallback: shoot downward
-            vy = {1: 13, 2: 16, 3: 19}.get(phase, 13)
+            # fallback: shoot downward with increased speed
+            vy = {1: 19, 2: 24, 3: 28}.get(phase, 19) * profile['speed_scale']
             vx = 0
-            print(f"BossAttackA: homing fallback spawn speed={vy}")
             self.bullets.append({'x': boss_cx, 'y': boss_cy, 'vx': vx, 'vy': vy, 'img': self.dot_img})
             return
 
@@ -300,7 +396,8 @@ class BossAttackA:
         dx = px - boss_cx
         dy = py - boss_cy
         dist = math.hypot(dx, dy) or 1.0
-        speed = {1: 13, 2: 16, 3: 19}.get(phase, 13)
+        # increased homing speeds
+        speed = {1: 19, 2: 24, 3: 28}.get(phase, 19) * profile['speed_scale']
         vx = dx / dist * speed
         vy = dy / dist * speed
         # spawn a small burst
@@ -348,7 +445,6 @@ class BossAttackC:
 
         self.state = 'idle'  # idle, windup, attack, cooldown
         self.state_enter_ms = 0
-        self.cycle_start_ms = 0
         self.current_attack = None
         self.attack_index = 0
 
@@ -359,7 +455,19 @@ class BossAttackC:
         }
 
         self.attack_configs = {
-            'vertical_missile': {'windup': 5000, 'cycle': 20000, 'speed': 36},
+            'vertical_missile': {'speed': 36},
+        }
+
+        # phase timing (ms): phase 2/3 follow requested harder pacing.
+        # phase 1 keeps original feel (5s telegraph + long cooldown).
+        self.phase_timing = {
+            # phase timings in milliseconds
+            # phase1: 1s windup, 3s cooldown
+            1: {'windup': 1000, 'cooldown': 3000},
+            # phase2: 500ms windup, 1s cooldown
+            2: {'windup': 500, 'cooldown': 1000},
+            # phase3: 300ms windup, 500ms cooldown
+            3: {'windup': 300, 'cooldown': 500},
         }
 
     def reset(self):
@@ -369,31 +477,29 @@ class BossAttackC:
         self.active_rocket = None
         self.state = 'idle'
         self.state_enter_ms = 0
-        self.cycle_start_ms = 0
         self.current_attack = None
         self.attack_index = 0
 
     def update(self, now_ms, boss_rect, phase=1, player_pos=None):
         seq = self.phase_sequences.get(phase, ['vertical_missile'])
         config = self.attack_configs.get('vertical_missile')
+        timing = self.phase_timing.get(phase, self.phase_timing[1])
 
         if self.state == 'idle':
             self.current_attack = seq[self.attack_index % len(seq)]
             self.state = 'windup'
             self.state_enter_ms = now_ms
-            self.cycle_start_ms = now_ms
             self.damage_zones = []
             self.active_rocket = None
             self.warning_line_x = self._pick_telegraph_x(boss_rect, player_pos)
             self.warning_icon = self._build_warning_icon(self.warning_line_x)
-            print(f"BossAttackC: enter windup {self.current_attack} phase={phase} time={now_ms}")
+            #print(f"BossAttackC: enter windup {self.current_attack} phase={phase} time={now_ms}")
             return
 
         elapsed = now_ms - self.state_enter_ms
-        cycle_elapsed = now_ms - self.cycle_start_ms
 
         if self.state == 'windup':
-            if elapsed >= config['windup']:
+            if elapsed >= timing['windup']:
                 self.state = 'attack'
                 self.state_enter_ms = now_ms
 
@@ -411,7 +517,7 @@ class BossAttackC:
                 self.warning_line_x = None
                 self.warning_icon = None
                 self.damage_zones = [self._rocket_to_zone(self.active_rocket)]
-                print(f"BossAttackC: start attack {self.current_attack} phase={phase} time={now_ms}")
+                #print(f"BossAttackC: start attack {self.current_attack} phase={phase} time={now_ms}")
 
         elif self.state == 'attack':
             if self.active_rocket is not None:
@@ -424,16 +530,10 @@ class BossAttackC:
                     self.damage_zones = []
                     self.state = 'cooldown'
                     self.state_enter_ms = now_ms
-                    print(f"BossAttackC: rocket finished, enter cooldown phase={phase} time={now_ms}")
-
-            if cycle_elapsed >= config['cycle']:
-                self.active_rocket = None
-                self.damage_zones = []
-                self.state = 'cooldown'
-                self.state_enter_ms = now_ms
+                    #print(f"BossAttackC: rocket finished, enter cooldown phase={phase} time={now_ms}")
 
         elif self.state == 'cooldown':
-            if cycle_elapsed >= config['cycle']:
+            if elapsed >= timing['cooldown']:
                 self.attack_index += 1
                 self.current_attack = None
                 self.state = 'idle'
@@ -442,7 +542,7 @@ class BossAttackC:
                 self.warning_icon = None
                 self.active_rocket = None
                 self.damage_zones = []
-                print(f"BossAttackC: cooldown end next index={self.attack_index} time={now_ms}")
+                #print(f"BossAttackC: cooldown end next index={self.attack_index} time={now_ms}")
 
     def draw(self, frame):
         if self.warning_line_x is not None:

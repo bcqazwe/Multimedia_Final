@@ -5,7 +5,7 @@ import os
 
 from Background import BackgroundScroller
 from Boss import BossController
-from Health import HealthMeter, draw_health_bar, draw_segmented_health_bar
+from Health import HealthMeter, draw_health_bar
 from item import ItemController
 from control import ShipController, BulletController
 
@@ -17,11 +17,25 @@ def asset_path(filename):
     return os.path.join(BASE_DIR, 'image', filename)
 
 
+def streaming_path(filename):
+    return os.path.join(BASE_DIR, 'streaming', filename)
+
+
 def imread_unicode(path, flags=cv2.IMREAD_COLOR):
     data = np.fromfile(path, dtype=np.uint8)
     if data.size == 0:
         return None
     return cv2.imdecode(data, flags)
+
+
+def ensure_bgr(image):
+    if image is None:
+        return None
+    if len(image.shape) == 2:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    return image
 
 class Game:
     def __init__(self):
@@ -79,8 +93,14 @@ class Game:
             
         # 遊戲狀態
         self.state = "START_MENU"
-        self.start_button_rect = [self.DISPLAY_W // 2 - 100, self.DISPLAY_H // 2 + 50, 200, 60] # x, y, w, h
+        self.start_button_rect = [71, 421, 177, 45] # x, y, w, h in menu image pixels
         self.menu_button_rect = [self.DISPLAY_W // 2 - 120, self.DISPLAY_H // 2 + 80, 240, 60]
+        self.intro_video_path = streaming_path('warning_start.mp4')
+        self.intro_played = False
+        self.menu_img = imread_unicode(asset_path('menu.png'), cv2.IMREAD_UNCHANGED)
+        self.menu_img = ensure_bgr(self.menu_img)
+        self.boss_phase_hp = 3333
+        self.dual_attack_mode = False
         
     def overlay_image(self, background, overlay, x, y):
         """將具有透明度的圖片疊加到背景上"""
@@ -109,28 +129,27 @@ class Game:
         return background
 
     def draw_start_menu(self):
-        # 使用背景快取的顯示尺寸畫面，避免每幀重新 resize
-        display_frame = self.background.get_display_frame()
+        if self.menu_img is None:
+            return np.zeros((self.DISPLAY_H, self.DISPLAY_W, 3), dtype=np.uint8)
 
-        # 2. 顯示 boss 與玩家船隻
-        display_frame = self.boss_controller.draw_body(display_frame)
-        self.overlay_image(display_frame, self.ship_display_img, self.ship_controller.x, self.ship_controller.y)
-        display_frame = self.boss_controller.draw_attacks(display_frame)
-        
-        # 3. 繪製標題
-        title = "SPACE SHOOTER"
-        font = cv2.FONT_HERSHEY_DUPLEX
-        cv2.putText(display_frame, title, (self.DISPLAY_W // 2 - 250, 300), font, 2, (255, 255, 255), 3, cv2.LINE_AA)
+        if self.menu_img.shape[1] != self.DISPLAY_W or self.menu_img.shape[0] != self.DISPLAY_H:
+            return cv2.resize(self.menu_img, (self.DISPLAY_W, self.DISPLAY_H), interpolation=cv2.INTER_AREA)
 
-        #draw_segmented_health_bar(display_frame, self.boss_health.current_hp, self.boss_health.max_hp, 40, 20, 1000, 180, 24, (0, 0, 255), label="BOSS")
-        #draw_health_bar(display_frame, self.player_health.current_hp, self.player_health.max_hp, 40, self.DISPLAY_H - 44, self.DISPLAY_W - 80, 24, (0, 255, 0), label="PLAYER")
-        
-        # 4. 繪製開始按鈕 (在放大後的畫面上繪製)
+        return self.menu_img.copy()
+
+    def _menu_click_to_image_space(self, x, y):
+        if self.menu_img is None:
+            return x, y
+
+        menu_h, menu_w = self.menu_img.shape[:2]
+        image_x = int(x * menu_w / self.DISPLAY_W)
+        image_y = int(y * menu_h / self.DISPLAY_H)
+        return image_x, image_y
+
+    def _start_button_clicked(self, x, y):
+        image_x, image_y = self._menu_click_to_image_space(x, y)
         bx, by, bw, bh = self.start_button_rect
-        cv2.rectangle(display_frame, (bx, by), (bx + bw, by + bh), (200, 200, 200), -1)
-        cv2.putText(display_frame, "START GAME", (bx + 20, by + 40), font, 1, (0, 0, 0), 2, cv2.LINE_AA)
-        
-        return display_frame
+        return bx <= image_x <= bx + bw and by <= image_y <= by + bh
 
     def draw_win_screen(self):
         display_frame = self.background.get_display_frame()
@@ -148,6 +167,41 @@ class Game:
 
         return display_frame
 
+    def play_intro_video(self):
+        if self.intro_played or not os.path.exists(self.intro_video_path):
+            self.intro_played = True
+            self.state = "START_MENU"
+            return
+
+        capture = cv2.VideoCapture(self.intro_video_path)
+        if not capture.isOpened():
+            self.intro_played = True
+            self.state = "START_MENU"
+            return
+
+        cv2.namedWindow('Space Shooter')
+        cv2.setMouseCallback('Space Shooter', lambda *args: None)
+
+        try:
+            while True:
+                success, frame = capture.read()
+                if not success:
+                    break
+
+                frame = cv2.resize(frame, (self.DISPLAY_W, self.DISPLAY_H), interpolation=cv2.INTER_AREA)
+                cv2.imshow('Space Shooter', frame)
+
+                key = cv2.waitKey(30) & 0xFF
+                if key == ord('q') or key == ord('Q'):
+                    self.state = "START_MENU"
+                    self.intro_played = True
+                    return
+
+            self.intro_played = True
+            self.state = "START_MENU"
+        finally:
+            capture.release()
+
     def draw_game_frame(self):
         display_frame = self.background.get_display_frame()
 
@@ -159,11 +213,45 @@ class Game:
         if not self.boss_health.is_empty():
             display_frame = self.boss_controller.draw_attacks(display_frame)
 
-        # show segmented bar with segments equal to one third of boss max HP
-        segment_hp = max(1, self.boss_health.max_hp // 3)
-        draw_segmented_health_bar(display_frame, self.boss_health.current_hp, self.boss_health.max_hp, 40, 20, segment_hp, 180, 24, (0, 0, 255), label="BOSS")
+        phase, phase_hp_current, phase_hp_max, remaining_bars = self._get_boss_phase_info()
+        draw_health_bar(
+            display_frame,
+            phase_hp_current,
+            phase_hp_max,
+            40,
+            20,
+            self.DISPLAY_W - 80,
+            24,
+            (0, 0, 255),
+            label=f"BOSS X{remaining_bars}",
+        )
         draw_health_bar(display_frame, self.player_health.current_hp, self.player_health.max_hp, 40, self.DISPLAY_H - 44, self.DISPLAY_W - 80, 24, (0, 255, 0), label="PLAYER")
+
+        if self.dual_attack_mode and hasattr(self.boss_controller, 'attackA'):
+            bullet_count = len(self.boss_controller.attackA.bullets)
+            cv2.putText(display_frame, f"A bullets: {bullet_count}", (20, self.DISPLAY_H - 70), cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 255, 0), 2, cv2.LINE_AA)
+
         return display_frame
+
+    def _get_boss_phase_info(self):
+        phase_hp = max(1, int(self.boss_phase_hp))
+        bhp = max(0, int(self.boss_health.current_hp))
+
+        if bhp > phase_hp * 2:
+            phase = 1
+        elif bhp > phase_hp:
+            phase = 2
+        else:
+            phase = 3
+
+        if bhp <= 0:
+            phase_hp_current = 0
+        else:
+            phase_hp_current = ((bhp - 1) % phase_hp) + 1
+
+        remaining_bars = min(3, (bhp + phase_hp - 1) // phase_hp)
+
+        return phase, phase_hp_current, phase_hp, remaining_bars
 
     def reset_match(self):
         self.boss_controller.reset()
@@ -188,6 +276,12 @@ class Game:
         if self.weapon_level < 3:
             self.weapon_level += 1
             self._sync_weapon_level()
+
+    def refill_player_health(self):
+        self.player_health.current_hp = self.player_health.max_hp
+
+    def cheat_upgrade_weapon(self):
+        self.upgrade_weapon()
 
     def downgrade_weapon(self):
         if self.weapon_level > 1:
@@ -324,8 +418,7 @@ class Game:
                     break
 
             if zone_hit_player and now_ms - self.last_player_hit_ms >= 500:
-                self.player_health.take_damage(10)
-                self.downgrade_weapon()
+                self.player_health.take_damage(self.player_health.current_hp)
                 self.last_player_hit_ms = now_ms
 
         if self.boss_health.is_empty():
@@ -334,8 +427,7 @@ class Game:
     def handle_mouse(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             if self.state == "START_MENU":
-                bx, by, bw, bh = self.start_button_rect
-                if bx <= x <= bx + bw and by <= y <= by + bh:
+                if self._start_button_clicked(x, y):
                     print("Game Starting...")
                     self.reset_match()
                     self.state = "RUNNING"
@@ -363,6 +455,8 @@ class Game:
 
     def run(self):
         cv2.namedWindow('Space Shooter')
+
+        self.play_intro_video()
         cv2.setMouseCallback('Space Shooter', self.handle_mouse)
         
         while True:
@@ -371,22 +465,19 @@ class Game:
             if self.state in ("START_MENU", "RUNNING"):
                 self.boss_controller.update(now_ms)
                 boss_rect = self.boss_controller.get_rect()
-                bhp = self.boss_health.current_hp
-                max_hp = self.boss_health.max_hp
-                # split boss HP into three equal phases
-                third = max_hp / 3.0
-                if bhp > 2 * third:
-                    phase = 1
-                elif bhp > third:
-                    phase = 2
-                else:
-                    phase = 3
+                phase, _, _, _ = self._get_boss_phase_info()
 
                 player_center = (self.ship_controller.x + self.ship_controller.ship_w // 2, self.ship_controller.y + self.ship_controller.ship_h // 2)
                 if hasattr(self.boss_controller, 'attackA'):
                     self.boss_controller.attackA.update(now_ms, boss_rect, phase=phase, player_pos=player_center)
                 if hasattr(self.boss_controller, 'attackC'):
                     self.boss_controller.attackC.update(now_ms, boss_rect, phase=phase, player_pos=player_center)
+
+                if self.dual_attack_mode and self.state == "RUNNING":
+                    if hasattr(self.boss_controller, 'attackA'):
+                        self.boss_controller.attackA.update(now_ms, boss_rect, phase=phase, player_pos=player_center)
+                    if hasattr(self.boss_controller, 'attackC'):
+                        self.boss_controller.attackC.update(now_ms, boss_rect, phase=phase, player_pos=player_center)
 
             if self.state == "RUNNING":
                 self.update_input()
@@ -408,6 +499,10 @@ class Game:
             self.background.update()
                 
             key = cv2.waitKey(16) & 0xFF
+            if key == ord('p') or key == ord('P'):
+                self.refill_player_health()
+            elif key == ord('o') or key == ord('O'):
+                self.cheat_upgrade_weapon()
             if key == ord('q') or key == ord('Q'):
                 break
             elif key == ord('m') or key == ord('M'):
@@ -418,6 +513,13 @@ class Game:
                 self.bullet_controller.last_fire_time = 0
                 self.item_controller.reset()
                 self.mouse_dragging = False
+            elif key == ord('s') or key == ord('S'):
+                if self.state == "START_MENU":
+                    self.reset_match()
+                    self.state = "RUNNING"
+            elif key == ord('2'):
+                self.dual_attack_mode = not self.dual_attack_mode
+                print(f"Dual attack mode: {self.dual_attack_mode}")
                 
         cv2.destroyAllWindows()
 
