@@ -3,6 +3,7 @@ import os
 
 import cv2
 import numpy as np
+from boss_attacks import BossAttackA, BossAttackC
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -48,6 +49,8 @@ class BossController:
 		self.y = self.boss_y
 		self.target_x = self.x
 		self.next_target_change_ms = 0
+		self.attackA = BossAttackA(display_w, display_h)
+		self.attackC = BossAttackC(display_w, display_h)
 
 	def get_rect(self):
 		return self.x, self.y, self.boss_w, self.boss_h
@@ -57,6 +60,8 @@ class BossController:
 		self.y = self.boss_y
 		self.target_x = self.x
 		self.next_target_change_ms = 0
+		self.attackA.reset()
+		self.attackC.reset()
 
 	def update(self, now_ms):
 		if now_ms >= self.next_target_change_ms:
@@ -68,8 +73,20 @@ class BossController:
 		elif self.x > self.target_x:
 			self.x = max(self.x - self.move_speed, self.target_x)
 
+		# attack update handled externally with phase/player info
+
 	def draw(self, frame):
+		frame = self.draw_body(frame)
+		frame = self.draw_attacks(frame)
+		return frame
+
+	def draw_body(self, frame):
 		return self._overlay_image(frame, self.boss_img, self.x, self.y)
+
+	def draw_attacks(self, frame):
+		frame = self.attackA.draw(frame)
+		frame = self.attackC.draw(frame)
+		return frame
 
 	def _overlay_image(self, background, overlay, x, y):
 		h, w = overlay.shape[:2]

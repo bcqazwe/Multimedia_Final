@@ -6,6 +6,7 @@ import os
 from Background import BackgroundScroller
 from Boss import BossController
 from Health import HealthMeter, draw_health_bar, draw_segmented_health_bar
+from item import ItemController
 from control import ShipController, BulletController
 
 
@@ -60,13 +61,19 @@ class Game:
             self.ship_controller,
             fire_interval=180,
             speed=16,
-            max_bullets=6,
+            max_bullets=40,
         )
+        self.weapon_level = 1
+        self._sync_weapon_level()
+        self.item_controller = ItemController(self.DISPLAY_W, self.DISPLAY_H)
 
         self.boss_controller = BossController(self.DISPLAY_W, self.DISPLAY_H)
         self.boss_health = HealthMeter(3000)
         self.player_health = HealthMeter(100)
         self.last_player_hit_ms = 0
+        self.mouse_dragging = False
+        self.drag_offset_x = 0
+        self.drag_offset_y = 0
             
         # 遊戲狀態
         self.state = "START_MENU"
@@ -107,8 +114,9 @@ class Game:
         display_frame = cv2.resize(frame, (self.DISPLAY_W, self.DISPLAY_H), interpolation=cv2.INTER_NEAREST)
 
         # 2. 顯示 boss 與玩家船隻
-        display_frame = self.boss_controller.draw(display_frame)
+        display_frame = self.boss_controller.draw_body(display_frame)
         self.overlay_image(display_frame, self.ship_display_img, self.ship_controller.x, self.ship_controller.y)
+        display_frame = self.boss_controller.draw_attacks(display_frame)
         
         # 3. 繪製標題
         title = "SPACE SHOOTER"
@@ -147,14 +155,15 @@ class Game:
         display_frame = cv2.resize(frame, (self.DISPLAY_W, self.DISPLAY_H), interpolation=cv2.INTER_NEAREST)
 
         if not self.boss_health.is_empty():
-            display_frame = self.boss_controller.draw(display_frame)
+            display_frame = self.boss_controller.draw_body(display_frame)
+        display_frame = self.item_controller.draw(display_frame)
         display_frame = self.bullet_controller.draw(display_frame)
         self.overlay_image(display_frame, self.ship_display_img, self.ship_controller.x, self.ship_controller.y)
+        if not self.boss_health.is_empty():
+            display_frame = self.boss_controller.draw_attacks(display_frame)
 
         draw_segmented_health_bar(display_frame, self.boss_health.current_hp, self.boss_health.max_hp, 40, 20, 1000, 180, 24, (0, 0, 255), label="BOSS")
         draw_health_bar(display_frame, self.player_health.current_hp, self.player_health.max_hp, 40, self.DISPLAY_H - 44, self.DISPLAY_W - 80, 24, (0, 255, 0), label="PLAYER")
-
-        cv2.putText(display_frame, "USE WASD / ARROWS", (120, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
         return display_frame
 
     def reset_match(self):
@@ -162,9 +171,55 @@ class Game:
         self.boss_health = HealthMeter(3000)
         self.player_health = HealthMeter(100)
         self.ship_controller.reset()
+        self.weapon_level = 1
+        self._sync_weapon_level()
         self.bullet_controller.bullets.clear()
         self.bullet_controller.last_fire_time = 0
+        self.item_controller.reset()
         self.last_player_hit_ms = 0
+        self.mouse_dragging = False
+
+    def _sync_weapon_level(self):
+        level_to_shots = {1: 1, 2: 2, 3: 4}
+        self.weapon_level = max(1, min(int(self.weapon_level), 3))
+        self.bullet_controller.shot_count = level_to_shots[self.weapon_level]
+
+    def upgrade_weapon(self):
+        if self.weapon_level < 3:
+            self.weapon_level += 1
+            self._sync_weapon_level()
+
+    def downgrade_weapon(self):
+        if self.weapon_level > 1:
+            self.weapon_level -= 1
+            self._sync_weapon_level()
+
+    def handle_items(self):
+        ship_x = self.ship_controller.x
+        ship_y = self.ship_controller.y
+        ship_w = self.ship_controller.ship_w
+        ship_h = self.ship_controller.ship_h
+        ship_rect = (ship_x, ship_y, ship_x + ship_w, ship_y + ship_h)
+
+        collected_kinds = self.item_controller.collect_player_items(ship_rect)
+
+        for item_kind in collected_kinds:
+            if item_kind == "upgrade":
+                self.upgrade_weapon()
+            elif item_kind == "heal":
+                self.player_health.heal(20)
+
+    def _get_ship_core_rect(self):
+        ship_x = self.ship_controller.x
+        ship_y = self.ship_controller.y
+        ship_w = self.ship_controller.ship_w
+        ship_h = self.ship_controller.ship_h
+
+        core_w = max(10, int(ship_w * 0.28))
+        core_h = max(10, int(ship_h * 0.28))
+        core_x = ship_x + (ship_w - core_w) // 2
+        core_y = ship_y + (ship_h - core_h) // 2
+        return (core_x, core_y, core_x + core_w, core_y + core_h)
 
     def handle_combat(self, now_ms):
         if self.boss_health.is_empty() or self.player_health.is_empty():
@@ -208,7 +263,65 @@ class Game:
 
         if hit_player and now_ms - self.last_player_hit_ms >= 500:
             self.player_health.take_damage(10)
+            self.downgrade_weapon()
             self.last_player_hit_ms = now_ms
+
+        ship_core_rect = self._get_ship_core_rect()
+
+        if hasattr(self.boss_controller, 'attackA'):
+            remaining_attack_a_bullets = []
+            attack_a_hit_player = False
+            core_left, core_top, core_right, core_bottom = ship_core_rect
+            core_cx = (core_left + core_right) / 2.0
+            core_cy = (core_top + core_bottom) / 2.0
+            core_half_w = max(6, int((core_right - core_left) * 0.22))
+            core_half_h = max(6, int((core_bottom - core_top) * 0.22))
+
+            for bullet in self.boss_controller.attackA.bullets:
+                bullet_w = bullet['img'].shape[1]
+                bullet_h = bullet['img'].shape[0]
+                bullet_cx = bullet['x'] + bullet_w / 2.0
+                bullet_cy = bullet['y'] + bullet_h / 2.0
+                hit_core = (
+                    abs(bullet_cx - core_cx) <= core_half_w
+                    and abs(bullet_cy - core_cy) <= core_half_h
+                )
+
+                if hit_core:
+                    attack_a_hit_player = True
+                else:
+                    remaining_attack_a_bullets.append(bullet)
+
+            self.boss_controller.attackA.bullets = remaining_attack_a_bullets
+
+            if attack_a_hit_player and now_ms - self.last_player_hit_ms >= 500:
+                self.player_health.take_damage(10)
+                self.downgrade_weapon()
+                self.last_player_hit_ms = now_ms
+
+        if hasattr(self.boss_controller, 'attackC'):
+            zone_hit_player = False
+            core_left, core_top, core_right, core_bottom = ship_core_rect
+            core_cx = (core_left + core_right) / 2.0
+            core_cy = (core_top + core_bottom) / 2.0
+            for zone in self.boss_controller.attackC.get_damage_zones():
+                if isinstance(zone, dict):
+                    zone_rect = (zone['x'], zone['y'], zone['x'] + zone['w'], zone['y'] + zone['h'])
+                else:
+                    zone_x, zone_y, zone_w, zone_h = zone
+                    zone_rect = (zone_x, zone_y, zone_x + zone_w, zone_y + zone_h)
+                hit_player = (
+                    zone_rect[0] <= core_cx <= zone_rect[2]
+                    and zone_rect[1] <= core_cy <= zone_rect[3]
+                )
+                if hit_player:
+                    zone_hit_player = True
+                    break
+
+            if zone_hit_player and now_ms - self.last_player_hit_ms >= 500:
+                self.player_health.take_damage(10)
+                self.downgrade_weapon()
+                self.last_player_hit_ms = now_ms
 
         if self.boss_health.is_empty():
             self.state = "WIN"
@@ -226,6 +339,22 @@ class Game:
                 if bx <= x <= bx + bw and by <= y <= by + bh:
                     self.reset_match()
                     self.state = "START_MENU"
+            elif self.state == "RUNNING":
+                ship_rect = (self.ship_controller.x, self.ship_controller.y, self.ship_controller.ship_w, self.ship_controller.ship_h)
+                self.mouse_dragging = True
+                self.drag_offset_x = self.ship_controller.x - x
+                self.drag_offset_y = self.ship_controller.y - y
+        elif event == cv2.EVENT_LBUTTONUP:
+            self.mouse_dragging = False
+        elif event == cv2.EVENT_MOUSEMOVE and self.state == "RUNNING" and self.mouse_dragging:
+            self.ship_controller.set_position(x + self.drag_offset_x, y + self.drag_offset_y)
+
+    def update_input(self):
+        if self.state != "RUNNING":
+            return
+
+        if not self.mouse_dragging:
+            self.ship_controller.update()
 
     def run(self):
         cv2.namedWindow('Space Shooter')
@@ -236,10 +365,26 @@ class Game:
 
             if self.state in ("START_MENU", "RUNNING"):
                 self.boss_controller.update(now_ms)
+                boss_rect = self.boss_controller.get_rect()
+                bhp = self.boss_health.current_hp
+                if bhp > 2000:
+                    phase = 1
+                elif bhp > 1000:
+                    phase = 2
+                else:
+                    phase = 3
+
+                player_center = (self.ship_controller.x + self.ship_controller.ship_w // 2, self.ship_controller.y + self.ship_controller.ship_h // 2)
+                if hasattr(self.boss_controller, 'attackA'):
+                    self.boss_controller.attackA.update(now_ms, boss_rect, phase=phase, player_pos=player_center)
+                if hasattr(self.boss_controller, 'attackC'):
+                    self.boss_controller.attackC.update(now_ms, boss_rect, phase=phase, player_pos=player_center)
 
             if self.state == "RUNNING":
-                self.ship_controller.update()
+                self.update_input()
                 self.bullet_controller.update(now_ms)
+                self.item_controller.update(now_ms)
+                self.handle_items()
                 self.handle_combat(now_ms)
 
             if self.state == "START_MENU":
@@ -263,6 +408,8 @@ class Game:
                 self.ship_controller.reset()
                 self.bullet_controller.bullets.clear()
                 self.bullet_controller.last_fire_time = 0
+                self.item_controller.reset()
+                self.mouse_dragging = False
                 
         cv2.destroyAllWindows()
 

@@ -42,6 +42,10 @@ class ShipController:
 	def move_down(self):
 		self.y = min(self.y + self.speed, self.display_h - self.ship_h)
 
+	def set_position(self, x, y):
+		self.x = max(0, min(int(x), self.display_w - self.ship_w))
+		self.y = max(0, min(int(y), self.display_h - self.ship_h))
+
 	def is_key_pressed(self, virtual_key_code):
 		return ctypes.windll.user32.GetAsyncKeyState(virtual_key_code) & 0x8000 != 0
 
@@ -67,7 +71,9 @@ class BulletController:
 		self.ship_controller = ship_controller
 		self.fire_interval = fire_interval
 		self.speed = speed
-		self.max_bullets = max_bullets
+		self.max_bullets = max(max_bullets, 12)
+		self.shot_count = 1
+		self.shot_spacing = 12
 		self.last_fire_time = 0
 		self.bullets = []
 
@@ -78,31 +84,35 @@ class BulletController:
 			bullet_img[:, :, :3] = 255
 			bullet_img[:, :, 3] = 255
 
-		self.bullet_img = cv2.resize(
-			bullet_img,
-			(bullet_img.shape[1] * 2, bullet_img.shape[0] * 2),
-			interpolation=cv2.INTER_NEAREST,
-		)
+		self.bullet_img = bullet_img
 
 	def is_key_pressed(self, virtual_key_code):
 		return ctypes.windll.user32.GetAsyncKeyState(virtual_key_code) & 0x8000 != 0
 
 	def can_fire(self, now_ms):
-		return (now_ms - self.last_fire_time) >= self.fire_interval and len(self.bullets) < self.max_bullets
+		return (now_ms - self.last_fire_time) >= self.fire_interval and len(self.bullets) + self.shot_count <= self.max_bullets
+
+	def _get_shot_offsets(self):
+		if self.shot_count <= 1:
+			return [0]
+
+		start_offset = -((self.shot_count - 1) * self.shot_spacing) // 2
+		return [start_offset + index * self.shot_spacing for index in range(self.shot_count)]
 
 	def fire(self, now_ms):
 		if not self.can_fire(now_ms):
 			return
 
 		bullet_h, bullet_w = self.bullet_img.shape[:2]
-		x = self.ship_controller.x + (self.ship_controller.ship_w - bullet_w) // 2
 		y = self.ship_controller.y - bullet_h + 8
-		self.bullets.append({"x": x, "y": y})
+		center_x = self.ship_controller.x + (self.ship_controller.ship_w - bullet_w) // 2
+
+		for offset_x in self._get_shot_offsets():
+			self.bullets.append({"x": center_x + offset_x, "y": y})
 		self.last_fire_time = now_ms
 
 	def update(self, now_ms):
-		if self.is_key_pressed(0x20):
-			self.fire(now_ms)
+		self.fire(now_ms)
 
 		for bullet in self.bullets:
 			bullet["y"] -= self.speed
