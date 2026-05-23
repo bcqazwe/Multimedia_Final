@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 import time
 import os
+import audio
+import ui_screens
 
 from Background import BackgroundScroller
 from Boss import BossController
@@ -111,6 +113,17 @@ class Game:
         self.last_damage_taken_ms = 0
         self.multiplier = 1
         self.multiplier_next_award_ms = 0
+        self.last_phase = 1
+        self.phase_transition_duration_ms = 5000
+        self.phase_transition_active = False
+        self.phase_transition_started_ms = 0
+        self.phase_transition_ended_ms = 0
+        self.phase1_to_2_transition_duration_ms = 5000
+        self.phase1_to_2_transition_active = False
+        self.phase1_to_2_transition_started_ms = 0
+        self.phase1_to_2_transition_ended_ms = 0
+        self.audio_manager = audio.AudioManager()
+        self._audio_synced_state = None
         
     def overlay_image(self, background, overlay, x, y):
         """將具有透明度的圖片疊加到背景上"""
@@ -138,53 +151,6 @@ class Game:
         background[y1:y2, x1:x2] = (1.0 - mask_roi) * roi + mask_roi * overlay_roi
         return background
 
-    def draw_start_menu(self):
-        if self.menu_img is None:
-            return np.zeros((self.DISPLAY_H, self.DISPLAY_W, 3), dtype=np.uint8)
-
-        if self.menu_img.shape[1] != self.DISPLAY_W or self.menu_img.shape[0] != self.DISPLAY_H:
-            return cv2.resize(self.menu_img, (self.DISPLAY_W, self.DISPLAY_H), interpolation=cv2.INTER_AREA)
-
-        return self.menu_img.copy()
-
-    def _menu_click_to_image_space(self, x, y):
-        if self.menu_img is None:
-            return x, y
-
-        menu_h, menu_w = self.menu_img.shape[:2]
-        image_x = int(x * menu_w / self.DISPLAY_W)
-        image_y = int(y * menu_h / self.DISPLAY_H)
-        return image_x, image_y
-
-    def _fail_click_to_image_space(self, x, y):
-        """將顯示器座標 (display) 映射回 fail 圖片的座標空間"""
-        if self.fail_img is None:
-            return x, y
-
-        img_h, img_w = self.fail_img.shape[:2]
-        image_x = int(x * img_w / self.DISPLAY_W)
-        image_y = int(y * img_h / self.DISPLAY_H)
-        return image_x, image_y
-
-    def _start_button_clicked(self, x, y):
-        image_x, image_y = self._menu_click_to_image_space(x, y)
-        bx, by, bw, bh = self.start_button_rect
-        return bx <= image_x <= bx + bw and by <= image_y <= by + bh
-
-    def _fail_restart_clicked(self, x, y):
-        image_x, image_y = self._fail_click_to_image_space(x, y)
-        return 44 <= image_x <= 273 and 493 <= image_y <= 546
-
-    def _fail_menu_clicked(self, x, y):
-        image_x, image_y = self._fail_click_to_image_space(x, y)
-        return 44 <= image_x <= 273 and 557 <= image_y <= 607
-
-    def _enter_fail_transition(self, now_ms):
-        if self.state not in ("FAIL_FADE_OUT", "FAIL_FADE_IN", "FAIL"):
-            self.state = "FAIL_FADE_OUT"
-            self.fail_transition_stage = "FADE_OUT"
-            self.fail_transition_started_ms = now_ms
-
     def draw_win_screen(self):
         display_frame = self.background.get_display_frame()
 
@@ -200,25 +166,6 @@ class Game:
         cv2.putText(display_frame, "MAIN MENU", (bx + 28, by + 40), font, 1, (0, 0, 0), 2, cv2.LINE_AA)
 
         return display_frame
-
-    def draw_fail_screen(self):
-        if self.fail_img is None:
-            return np.zeros((self.DISPLAY_H, self.DISPLAY_W, 3), dtype=np.uint8)
-
-        if self.fail_img.shape[1] != self.DISPLAY_W or self.fail_img.shape[0] != self.DISPLAY_H:
-            return cv2.resize(self.fail_img, (self.DISPLAY_W, self.DISPLAY_H), interpolation=cv2.INTER_AREA)
-
-        return self.fail_img.copy()
-
-    def draw_fail_transition(self, now_ms):
-        base_frame = self.draw_game_frame()
-        elapsed = now_ms - self.fail_transition_started_ms
-
-        if self.fail_transition_stage == "FADE_OUT":
-            progress = min(max(elapsed / max(1, self.fail_transition_fade_out_ms), 0.0), 1.0)
-            return cv2.addWeighted(base_frame, 1.0 - progress, np.zeros_like(base_frame), progress, 0)
-
-        return self.draw_fail_screen()
 
     def play_intro_video(self):
         if self.intro_played or not os.path.exists(self.intro_video_path):
@@ -255,7 +202,7 @@ class Game:
         finally:
             capture.release()
 
-    def draw_game_frame(self):
+    def draw_game_frame(self, now_ms=None):
         display_frame = self.background.get_display_frame()
 
         if not self.boss_health.is_empty():
@@ -286,6 +233,11 @@ class Game:
         if self.dual_attack_mode and hasattr(self.boss_controller, 'attackA'):
             bullet_count = len(self.boss_controller.attackA.bullets)
             cv2.putText(display_frame, f"A bullets: {bullet_count}", (20, self.DISPLAY_H - 70), cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 255, 0), 2, cv2.LINE_AA)
+
+        if now_ms is None:
+            now_ms = int(time.time() * 1000)
+
+        display_frame = ui_screens.apply_player_hit_effect(self, display_frame, now_ms)
 
         return display_frame
 
@@ -327,6 +279,14 @@ class Game:
         self.last_damage_taken_ms = 0
         self.multiplier = 1
         self.multiplier_next_award_ms = 0
+        self.last_phase = 1
+        self.phase_transition_active = False
+        self.phase_transition_started_ms = 0
+        self.phase_transition_ended_ms = 0
+        self.phase1_to_2_transition_active = False
+        self.phase1_to_2_transition_started_ms = 0
+        self.phase1_to_2_transition_ended_ms = 0
+        self.audio_manager.reset_phase3_warning_guard()
 
     def _sync_weapon_level(self):
         level_to_shots = {1: 1, 2: 2, 3: 4}
@@ -372,6 +332,35 @@ class Game:
     def _add_score_for_damage(self):
         self.score += int(50 * self.multiplier)
 
+    def _sync_background_music(self, phase):
+        desired_track = None
+
+        if self.state == "START_MENU":
+            desired_track = "menu"
+        elif self.state == "RUNNING":
+            if phase == 1 and not ui_screens.is_soft_pulse_transition_active(self):
+                desired_track = "stage1"
+            elif phase == 2 and not ui_screens.is_soft_pulse_transition_active(self) and not ui_screens.is_phase_transition_active(self):
+                desired_track = "stage2"
+        elif self.state == "PRE_BATTLE":
+            desired_track = None
+
+        if desired_track == self._audio_synced_state:
+            return
+
+        if desired_track == "menu":
+            self.audio_manager.play_menu_music()
+        elif desired_track == "stage1":
+            self.audio_manager.play_stage1_music()
+        elif desired_track == "stage2":
+            self.audio_manager.play_stage2_music()
+        else:
+            self.audio_manager.fadeout_menu_music()
+            self.audio_manager.fadeout_stage1_music()
+            self.audio_manager.fadeout_stage2_music()
+
+        self._audio_synced_state = desired_track
+
     def downgrade_weapon(self):
         if self.weapon_level > 1:
             self.weapon_level -= 1
@@ -409,7 +398,7 @@ class Game:
             return
 
         if self.player_health.is_empty():
-            self._enter_fail_transition(now_ms)
+            ui_screens.enter_fail_transition(self, now_ms)
             return
 
         combat_check_interval_ms = 32
@@ -499,7 +488,7 @@ class Game:
                 self._reset_multiplier_on_damage(now_ms)
 
             if self.player_health.is_empty():
-                self._enter_fail_transition(now_ms)
+                ui_screens.enter_fail_transition(self, now_ms)
                 return
 
         if hasattr(self.boss_controller, 'attackC'):
@@ -527,40 +516,11 @@ class Game:
                 self._reset_multiplier_on_damage(now_ms)
 
             if self.player_health.is_empty():
-                self._enter_fail_transition(now_ms)
+                ui_screens.enter_fail_transition(self, now_ms)
                 return
 
         if self.boss_health.is_empty():
             self.state = "WIN"
-
-    def handle_mouse(self, event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            if self.state == "START_MENU":
-                if self._start_button_clicked(x, y):
-                    print("Game Starting...")
-                    self.reset_match()
-                    self.state = "RUNNING"
-            elif self.state == "WIN":
-                bx, by, bw, bh = self.menu_button_rect
-                if bx <= x <= bx + bw and by <= y <= by + bh:
-                    self.reset_match()
-                    self.state = "START_MENU"
-            elif self.state == "FAIL":
-                if self._fail_restart_clicked(x, y):
-                    self.reset_match()
-                    self.state = "RUNNING"
-                elif self._fail_menu_clicked(x, y):
-                    self.reset_match()
-                    self.state = "START_MENU"
-            elif self.state == "RUNNING":
-                ship_rect = (self.ship_controller.x, self.ship_controller.y, self.ship_controller.ship_w, self.ship_controller.ship_h)
-                self.mouse_dragging = True
-                self.drag_offset_x = self.ship_controller.x - x
-                self.drag_offset_y = self.ship_controller.y - y
-        elif event == cv2.EVENT_LBUTTONUP:
-            self.mouse_dragging = False
-        elif event == cv2.EVENT_MOUSEMOVE and self.state == "RUNNING" and self.mouse_dragging:
-            self.ship_controller.set_position(x + self.drag_offset_x, y + self.drag_offset_y)
 
     def update_input(self):
         if self.state != "RUNNING":
@@ -573,56 +533,84 @@ class Game:
         cv2.namedWindow('Space Shooter')
 
         self.play_intro_video()
-        cv2.setMouseCallback('Space Shooter', self.handle_mouse)
-        
+        cv2.setMouseCallback('Space Shooter', lambda event, x, y, flags, param: ui_screens.handle_mouse_event(self, event, x, y, flags, param))
+
         while True:
             now_ms = int(time.time() * 1000)
+            phase, _, _, _ = self._get_boss_phase_info()
+            self._sync_background_music(phase)
 
-            if self.state in ("START_MENU", "RUNNING"):
-                self.boss_controller.update(now_ms)
-                boss_rect = self.boss_controller.get_rect()
-                phase, _, _, _ = self._get_boss_phase_info()
+            if self.state == "PRE_BATTLE":
+                ui_screens.update_battle_countdown(self, now_ms)
 
-                player_center = (self.ship_controller.x + self.ship_controller.ship_w // 2, self.ship_controller.y + self.ship_controller.ship_h // 2)
-                if hasattr(self.boss_controller, 'attackA'):
-                    self.boss_controller.attackA.update(now_ms, boss_rect, phase=phase, player_pos=player_center)
-                if hasattr(self.boss_controller, 'attackC'):
-                    self.boss_controller.attackC.update(now_ms, boss_rect, phase=phase, player_pos=player_center)
+            if self.state == "RUNNING":
+                if self.last_phase == 1 and phase == 2 and not ui_screens.is_soft_pulse_transition_active(self):
+                    ui_screens.begin_soft_pulse_transition(self, now_ms)
+                if self.last_phase == 2 and phase == 3 and not ui_screens.is_phase_transition_active(self):
+                    self.audio_manager.play_phase3_warning_once()
+                    ui_screens.begin_phase_transition(self, now_ms)
 
-                if self.dual_attack_mode and self.state == "RUNNING":
+                if not ui_screens.is_soft_pulse_transition_active(self) and not ui_screens.is_phase_transition_active(self):
+                    self.boss_controller.update(now_ms)
+                    boss_rect = self.boss_controller.get_rect()
+                    player_center = (
+                        self.ship_controller.x + self.ship_controller.ship_w // 2,
+                        self.ship_controller.y + self.ship_controller.ship_h // 2,
+                    )
                     if hasattr(self.boss_controller, 'attackA'):
                         self.boss_controller.attackA.update(now_ms, boss_rect, phase=phase, player_pos=player_center)
                     if hasattr(self.boss_controller, 'attackC'):
                         self.boss_controller.attackC.update(now_ms, boss_rect, phase=phase, player_pos=player_center)
 
+                    if self.dual_attack_mode:
+                        if hasattr(self.boss_controller, 'attackA'):
+                            self.boss_controller.attackA.update(now_ms, boss_rect, phase=phase, player_pos=player_center)
+                        if hasattr(self.boss_controller, 'attackC'):
+                            self.boss_controller.attackC.update(now_ms, boss_rect, phase=phase, player_pos=player_center)
+            elif self.state == "PRE_BATTLE":
+                self.boss_controller.update(now_ms)
+
+            if self.state == "PHASE_PULSE":
+                ui_screens.update_soft_pulse_transition(self, now_ms)
+            if self.state == "PHASE_GLITCH":
+                ui_screens.update_phase_transition(self, now_ms)
+
             if self.state == "RUNNING":
-                self.update_input()
-                self._update_score_over_time(now_ms)
-                self.bullet_controller.update(now_ms)
-                self.item_controller.update(now_ms)
-                self.handle_items()
-                self.handle_combat(now_ms)
+                if not ui_screens.is_soft_pulse_transition_active(self) and not ui_screens.is_phase_transition_active(self):
+                    self.update_input()
+                    self._update_score_over_time(now_ms)
+                    self.bullet_controller.update(now_ms)
+                    self.item_controller.update(now_ms)
+                    self.handle_items()
+                    self.handle_combat(now_ms)
             elif self.state == "FAIL_FADE_OUT":
-                if now_ms - self.fail_transition_started_ms >= self.fail_transition_fade_out_ms:
-                    self.fail_transition_stage = None
-                    self.state = "FAIL"
+                ui_screens.update_fail_transition(self, now_ms)
 
             if self.state == "START_MENU":
-                frame = self.draw_start_menu()
+                frame = ui_screens.draw_start_menu(self)
             elif self.state == "WIN":
                 frame = self.draw_win_screen()
+            elif self.state == "PRE_BATTLE":
+                frame = self.draw_game_frame(now_ms)
+                frame = ui_screens.draw_battle_countdown_overlay(self, frame, now_ms)
+            elif self.state == "PHASE_PULSE":
+                frame = ui_screens.draw_soft_pulse_transition(self, now_ms)
+            elif self.state == "PHASE_GLITCH":
+                frame = ui_screens.draw_phase_transition(self, now_ms)
             elif self.state == "FAIL_FADE_OUT":
-                frame = self.draw_fail_transition(now_ms)
+                frame = ui_screens.draw_fail_transition(self, now_ms)
             elif self.state == "FAIL":
-                frame = self.draw_fail_screen()
+                frame = ui_screens.draw_fail_screen(self)
             else:
-                frame = self.draw_game_frame()
-            
+                frame = self.draw_game_frame(now_ms)
+
+            self.last_phase = phase
+
             cv2.imshow('Space Shooter', frame)
-            
+
             # 更新背景捲動
             self.background.update()
-                
+
             key = cv2.waitKey(16) & 0xFF
             if key == ord('p') or key == ord('P'):
                 self.refill_player_health()
@@ -640,13 +628,13 @@ class Game:
                 self.mouse_dragging = False
             elif key == ord('s') or key == ord('S'):
                 if self.state == "START_MENU":
-                    self.reset_match()
-                    self.state = "RUNNING"
+                    ui_screens.start_battle_countdown(self, now_ms)
             elif key == ord('2'):
                 self.dual_attack_mode = not self.dual_attack_mode
                 print(f"Dual attack mode: {self.dual_attack_mode}")
-                
+
         cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     game = Game()
