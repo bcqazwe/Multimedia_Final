@@ -22,7 +22,7 @@ class BossController:
 		self.display_h = display_h
 		self.move_speed = move_speed
 		self.last_target_change = 0
-		self.scale_factor = 2
+		self.scale_factor = max(1, int(round(min(self.display_w / 320.0, self.display_h / 640.0))))
 		if not os.path.isabs(image_path):
 			image_path = os.path.join(BASE_DIR, 'image', image_path)
 

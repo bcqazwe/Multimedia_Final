@@ -19,6 +19,8 @@ def imread_unicode(path, flags=cv2.IMREAD_COLOR):
 
 PHASE_TRANSITION_STATE = "PHASE_GLITCH"
 SOFT_PULSE_TRANSITION_STATE = "PHASE_PULSE"
+CLICK_REF_W = 320
+CLICK_REF_H = 640
 
 
 @lru_cache(maxsize=8)
@@ -276,6 +278,21 @@ def _menu_click_to_image_space(game, x, y):
     return image_x, image_y
 
 
+def _scale_click_rect(image, left, top, right, bottom):
+    if image is None:
+        return left, top, right, bottom
+
+    img_h, img_w = image.shape[:2]
+    scale_x = img_w / float(CLICK_REF_W)
+    scale_y = img_h / float(CLICK_REF_H)
+    return (
+        int(round(left * scale_x)),
+        int(round(top * scale_y)),
+        int(round(right * scale_x)),
+        int(round(bottom * scale_y)),
+    )
+
+
 def _fail_click_to_image_space(game, x, y):
     if game.fail_img is None:
         return x, y
@@ -304,22 +321,26 @@ def _start_button_clicked(game, x, y):
 
 def _fail_restart_clicked(game, x, y):
     image_x, image_y = _fail_click_to_image_space(game, x, y)
-    return 44 <= image_x <= 273 and 493 <= image_y <= 546
+    left, top, right, bottom = _scale_click_rect(game.fail_img, 44, 493, 273, 546)
+    return left <= image_x <= right and top <= image_y <= bottom
 
 
 def _fail_menu_clicked(game, x, y):
     image_x, image_y = _fail_click_to_image_space(game, x, y)
-    return 44 <= image_x <= 273 and 557 <= image_y <= 607
+    left, top, right, bottom = _scale_click_rect(game.fail_img, 44, 557, 273, 607)
+    return left <= image_x <= right and top <= image_y <= bottom
 
 
 def _win_play_again_clicked(game, x, y):
     image_x, image_y = _win_click_to_image_space(game, x, y)
-    return 50 <= image_x <= 267 and 420 <= image_y <= 468
+    left, top, right, bottom = _scale_click_rect(game.win_img, 50, 420, 267, 468)
+    return left <= image_x <= right and top <= image_y <= bottom
 
 
 def _win_menu_clicked(game, x, y):
     image_x, image_y = _win_click_to_image_space(game, x, y)
-    return 50 <= image_x <= 267 and 491 <= image_y <= 539
+    left, top, right, bottom = _scale_click_rect(game.win_img, 50, 491, 267, 539)
+    return left <= image_x <= right and top <= image_y <= bottom
 
 
 def enter_fail_transition(game, now_ms):
@@ -596,27 +617,32 @@ def _apply_glitch_effect(frame, intensity):
 
 
 def handle_mouse_event(game, event, x, y, flags, param):
+    if hasattr(game, "screen_to_game_coords"):
+        game_x, game_y = game.screen_to_game_coords(x, y)
+    else:
+        game_x, game_y = x, y
+
     if event == cv2.EVENT_LBUTTONDOWN:
         if game.state == "START_MENU":
-            if _start_button_clicked(game, x, y):
+            if _start_button_clicked(game, game_x, game_y):
                 print("Game Starting...")
                 start_battle_countdown(game, int(time.time() * 1000))
         elif game.state == "WIN":
-            if _win_play_again_clicked(game, x, y):
+            if _win_play_again_clicked(game, game_x, game_y):
                 start_battle_countdown(game, int(time.time() * 1000))
-            elif _win_menu_clicked(game, x, y):
+            elif _win_menu_clicked(game, game_x, game_y):
                 game.go_to_start_menu(reset_match=True)
         elif game.state == "FAIL":
-            if _fail_restart_clicked(game, x, y):
+            if _fail_restart_clicked(game, game_x, game_y):
                 game.reset_match()
                 game.state = "RUNNING"
-            elif _fail_menu_clicked(game, x, y):
+            elif _fail_menu_clicked(game, game_x, game_y):
                 game.go_to_start_menu(reset_match=True)
         elif game.state == "RUNNING":
             game.mouse_dragging = True
-            game.drag_offset_x = game.ship_controller.x - x
-            game.drag_offset_y = game.ship_controller.y - y
+            game.drag_offset_x = game.ship_controller.x - game_x
+            game.drag_offset_y = game.ship_controller.y - game_y
     elif event == cv2.EVENT_LBUTTONUP:
         game.mouse_dragging = False
     elif event == cv2.EVENT_MOUSEMOVE and game.state == "RUNNING" and game.mouse_dragging:
-        game.ship_controller.set_position(x + game.drag_offset_x, y + game.drag_offset_y)
+        game.ship_controller.set_position(game_x + game.drag_offset_x, game_y + game.drag_offset_y)

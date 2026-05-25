@@ -26,9 +26,15 @@ class ShipController:
 		self.ship_w = ship_w
 		self.ship_h = ship_h
 		self.speed = speed
+		self.spawn_y = min(
+			max(int(self.display_h * 0.8125), int(self.display_h * 0.55)),
+			self.display_h - self.ship_h - max(16, self.display_h // 40),
+		)
+		self.min_y = int(self.display_h * 0.55)
+		self.max_y = self.display_h - self.ship_h - max(16, self.display_h // 40)
 
 		self.x = (self.display_w - self.ship_w) // 2
-		self.y = self.display_h // 2 + 200
+		self.y = self.spawn_y
 
 	def move_left(self):
 		self.x = max(self.x - self.speed, 0)
@@ -37,14 +43,14 @@ class ShipController:
 		self.x = min(self.x + self.speed, self.display_w - self.ship_w)
 
 	def move_up(self):
-		self.y = max(self.y - self.speed, 0)
+		self.y = max(self.y - self.speed, self.min_y)
 
 	def move_down(self):
-		self.y = min(self.y + self.speed, self.display_h - self.ship_h)
+		self.y = min(self.y + self.speed, self.max_y)
 
 	def set_position(self, x, y):
 		self.x = max(0, min(int(x), self.display_w - self.ship_w))
-		self.y = max(0, min(int(y), self.display_h - self.ship_h))
+		self.y = max(self.min_y, min(int(y), self.max_y))
 
 	def is_key_pressed(self, virtual_key_code):
 		return ctypes.windll.user32.GetAsyncKeyState(virtual_key_code) & 0x8000 != 0
@@ -61,7 +67,7 @@ class ShipController:
 
 	def reset(self):
 		self.x = (self.display_w - self.ship_w) // 2
-		self.y = self.display_h // 2 + 200
+		self.y = self.spawn_y
 
 
 class BulletController:

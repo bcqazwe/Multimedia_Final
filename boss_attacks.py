@@ -56,6 +56,8 @@ class BossAttackA:
     def __init__(self, display_w, display_h):
         self.display_w = display_w
         self.display_h = display_h
+        self.ui_scale = max(1, int(round(min(self.display_w / 320.0, self.display_h / 640.0))))
+        self.pixel_scale = self.ui_scale / 2.0
 
         straight = imread_unicode(asset_path('boss_bullet_straight.png'))
         dot = imread_unicode(asset_path('boss_bullet_dot.png'))
@@ -69,8 +71,16 @@ class BossAttackA:
             dot[:, :, 3] = 255
 
         # Slightly larger sizes for better visibility
-        self.straight_img = cv2.resize(straight, (28, 52), interpolation=cv2.INTER_AREA)
-        self.dot_img = cv2.resize(dot, (24, 24), interpolation=cv2.INTER_AREA)
+        self.straight_img = cv2.resize(
+            straight,
+            (max(1, int(round(14 * self.ui_scale))), max(1, int(round(26 * self.ui_scale)))),
+            interpolation=cv2.INTER_AREA,
+        )
+        self.dot_img = cv2.resize(
+            dot,
+            (max(1, int(round(12 * self.ui_scale))), max(1, int(round(12 * self.ui_scale)))),
+            interpolation=cv2.INTER_AREA,
+        )
         self.straight_rgb = self.straight_img[:, :, :3]
         self.straight_mask = self.straight_img[:, :, 3:] / 255.0
         self.dot_rgb = self.dot_img[:, :, :3]
@@ -196,7 +206,7 @@ class BossAttackA:
             b['y'] += b['vy']
 
         # cull off-screen early; handle horizontal reflection if bullet still allowed to bounce
-        margin = 24
+        margin = max(24, int(round(12 * self.ui_scale)))
         keep = []
         for b in self.bullets:
             bw = b.get('img').shape[1] if b.get('img') is not None else 8
@@ -243,7 +253,7 @@ class BossAttackA:
     def _spawn_bidir_bounce(self, boss_x, boss_y, boss_w, boss_h, phase, profile=None):
         # spawn one left lane and one right lane; repeated spawns over time form two long lines
         profile = profile or self.phase_profiles.get(phase, self.phase_profiles[1])
-        speed = {1: 12, 2: 18, 3: 26}.get(phase, 12) * profile['speed_scale']
+        speed = {1: 12, 2: 18, 3: 26}.get(phase, 12) * profile['speed_scale'] * self.pixel_scale
         max_bounces = {1: 1, 2: 2, 3: 3}.get(phase, 1)
         loss = {1: 0.98, 2: 0.96, 3: 0.94}.get(phase, 0.96)
         vertical_scale = {1: 0.55, 2: 0.40, 3: 0.25}.get(phase, 0.55) * profile['angle_scale']
@@ -337,7 +347,7 @@ class BossAttackA:
         n = counts.get(phase, 3)
         spacing = max(28, boss_w // max(1, n - 1))
         # increased speeds (approx 1.5x) while keeping spawn counts unchanged
-        speed = {1: 12, 2: 16, 3: 21}.get(phase, 12) * profile['speed_scale']
+        speed = {1: 12, 2: 16, 3: 21}.get(phase, 12) * profile['speed_scale'] * self.pixel_scale
         for i in range(n):
             x = boss_x + (boss_w - self.straight_img.shape[1]) // 2 + int((i - (n - 1) / 2) * spacing)
             y = boss_y + boss_h
@@ -357,7 +367,7 @@ class BossAttackA:
         profile = profile or self.phase_profiles.get(phase, self.phase_profiles[1])
         per_fan = {1: 7, 2: 10, 3: 12}[phase]
         # increased speeds for fan bullets
-        speed = {1: 12, 2: 16, 3: 21}[phase] * profile['speed_scale']
+        speed = {1: 12, 2: 16, 3: 21}[phase] * profile['speed_scale'] * self.pixel_scale
         fan_spread = math.radians(92) * profile['angle_scale']
         fan_bias = math.radians(18) * profile['angle_scale']
         for side in (-1, 1):
@@ -387,7 +397,7 @@ class BossAttackA:
         profile = profile or self.phase_profiles.get(phase, self.phase_profiles[1])
         if player_pos is None:
             # fallback: shoot downward with increased speed
-            vy = {1: 19, 2: 24, 3: 28}.get(phase, 19) * profile['speed_scale']
+            vy = {1: 19, 2: 24, 3: 28}.get(phase, 19) * profile['speed_scale'] * self.pixel_scale
             vx = 0
             self.bullets.append({'x': boss_cx, 'y': boss_cy, 'vx': vx, 'vy': vy, 'img': self.dot_img})
             return
@@ -397,7 +407,7 @@ class BossAttackA:
         dy = py - boss_cy
         dist = math.hypot(dx, dy) or 1.0
         # increased homing speeds
-        speed = {1: 19, 2: 24, 3: 28}.get(phase, 19) * profile['speed_scale']
+        speed = {1: 19, 2: 24, 3: 28}.get(phase, 19) * profile['speed_scale'] * self.pixel_scale
         vx = dx / dist * speed
         vy = dy / dist * speed
         # spawn a small burst
@@ -411,6 +421,8 @@ class BossAttackC:
     def __init__(self, display_w, display_h):
         self.display_w = display_w
         self.display_h = display_h
+        self.ui_scale = max(1, int(round(min(self.display_w / 320.0, self.display_h / 640.0))))
+        self.pixel_scale = self.ui_scale / 2.0
 
         lockdown = imread_unicode(asset_path('lockdown.png'))
         if lockdown is None:
@@ -431,8 +443,16 @@ class BossAttackC:
             alpha = np.full((rocket.shape[0], rocket.shape[1], 1), 255, dtype=np.uint8)
             rocket = np.concatenate([rocket, alpha], axis=2)
 
-        self.warning_img = cv2.resize(lockdown, (90, 90), interpolation=cv2.INTER_AREA)
-        self.rocket_img = cv2.resize(rocket, (46, 92), interpolation=cv2.INTER_AREA)
+        self.warning_img = cv2.resize(
+            lockdown,
+            (max(1, int(round(45 * self.ui_scale))), max(1, int(round(45 * self.ui_scale)))),
+            interpolation=cv2.INTER_AREA,
+        )
+        self.rocket_img = cv2.resize(
+            rocket,
+            (max(1, int(round(23 * self.ui_scale))), max(1, int(round(46 * self.ui_scale)))),
+            interpolation=cv2.INTER_AREA,
+        )
         self.warning_rgb = self.warning_img[:, :, :3]
         self.warning_mask = self.warning_img[:, :, 3:] / 255.0
         self.rocket_rgb = self.rocket_img[:, :, :3]
@@ -506,7 +526,7 @@ class BossAttackC:
                 rocket_w = self.rocket_img.shape[1]
                 rocket_h = self.rocket_img.shape[0]
                 rocket_x = max(0, min(self.warning_line_x - rocket_w // 2, self.display_w - rocket_w))
-                speed = float(config['speed'] + phase * 4)
+                speed = float(config['speed'] + phase * 4) * self.pixel_scale
                 self.active_rocket = {
                     'x': float(rocket_x),
                     'y': float(-rocket_h),

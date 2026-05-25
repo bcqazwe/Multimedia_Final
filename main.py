@@ -46,6 +46,7 @@ class Game:
         self.WINDOW_W, self.WINDOW_H = 320, 640
         self.display_scale = self._choose_display_scale(preferred_scale=2)
         self.DISPLAY_W, self.DISPLAY_H = self.WINDOW_W * self.display_scale, self.WINDOW_H * self.display_scale
+        self.present_w, self.present_h = self._choose_present_size()
 
         # 直接重用 Background.py 的背景捲動邏輯
         self.background = BackgroundScroller(
@@ -98,8 +99,12 @@ class Game:
             
         # 遊戲狀態
         self.state = "START_MENU"
-        self.start_button_rect = [71, 421, 177, 45] # x, y, w, h in menu image pixels
-        self.menu_button_rect = [self.DISPLAY_W // 2 - 120, self.DISPLAY_H // 2 + 80, 240, 60]
+        self.menu_button_rect = [
+            int(self.DISPLAY_W * 0.3125),
+            int(self.DISPLAY_H * 0.5625),
+            max(1, int(self.DISPLAY_W * 0.375)),
+            max(1, int(self.DISPLAY_H * 0.046875)),
+        ]
         self.intro_video_path = streaming_path('warning_start.mp4')
         self.intro_played = False
         self.menu_img = imread_unicode(asset_path('menu.png'), cv2.IMREAD_UNCHANGED)
@@ -108,6 +113,7 @@ class Game:
         self.fail_img = ensure_bgr(self.fail_img)
         self.win_img = imread_unicode(asset_path('win.jpg'), cv2.IMREAD_UNCHANGED)
         self.win_img = ensure_bgr(self.win_img)
+        self.start_button_rect = self._scale_rect_to_image((71, 421, 177, 45), self.menu_img)
         self.boss_phase_hp = 3333
         self.dual_attack_mode = False
         self.fail_transition_started_ms = 0
@@ -143,15 +149,42 @@ class Game:
             return None, None
 
     def _choose_display_scale(self, preferred_scale=2):
-        screen_w, screen_h = self._get_primary_screen_size()
-        if not screen_w or not screen_h:
-            return int(preferred_scale)
+        _ = self._get_primary_screen_size()
+        return max(1, int(preferred_scale))
 
-        # 保留視窗邊框和工作列空間，避免 1080p 高度超出螢幕
-        safe_w = max(1, screen_w - 48)
-        safe_h = max(1, screen_h - 120)
-        fit_scale = min(safe_w // self.WINDOW_W, safe_h // self.WINDOW_H)
-        return max(1, min(int(preferred_scale), int(fit_scale)))
+    def _choose_present_size(self):
+        return self.DISPLAY_W, self.DISPLAY_H
+
+    def _scale_rect_to_image(self, rect, image, ref_w=320, ref_h=640):
+        if image is None:
+            return list(rect)
+
+        img_h, img_w = image.shape[:2]
+        scale_x = img_w / float(ref_w)
+        scale_y = img_h / float(ref_h)
+        x, y, width, height = rect
+        return [
+            int(round(x * scale_x)),
+            int(round(y * scale_y)),
+            int(round(width * scale_x)),
+            int(round(height * scale_y)),
+        ]
+
+    def screen_to_game_coords(self, x, y):
+        if self.present_w <= 0 or self.present_h <= 0:
+            return int(x), int(y)
+
+        game_x = int(round(x * self.DISPLAY_W / float(self.present_w)))
+        game_y = int(round(y * self.DISPLAY_H / float(self.present_h)))
+        game_x = max(0, min(game_x, self.DISPLAY_W - 1))
+        game_y = max(0, min(game_y, self.DISPLAY_H - 1))
+        return game_x, game_y
+
+    def _apply_window_size(self):
+        try:
+            cv2.resizeWindow('Space Shooter', self.DISPLAY_W, self.DISPLAY_H)
+        except Exception:
+            pass
         
     def overlay_image(self, background, overlay, x, y):
         """將具有透明度的圖片疊加到背景上"""
@@ -194,7 +227,8 @@ class Game:
             self.go_to_start_menu(reset_match=False)
             return
 
-        cv2.namedWindow('Space Shooter')
+        cv2.namedWindow('Space Shooter', cv2.WINDOW_NORMAL)
+        self._apply_window_size()
         cv2.setMouseCallback('Space Shooter', lambda *args: None)
 
         try:
@@ -585,9 +619,11 @@ class Game:
             self.ship_controller.update()
 
     def run(self):
-        cv2.namedWindow('Space Shooter')
+        cv2.namedWindow('Space Shooter', cv2.WINDOW_NORMAL)
+        self._apply_window_size()
 
         self.play_intro_video()
+        self._apply_window_size()
         cv2.setMouseCallback('Space Shooter', lambda event, x, y, flags, param: ui_screens.handle_mouse_event(self, event, x, y, flags, param))
 
         while True:
