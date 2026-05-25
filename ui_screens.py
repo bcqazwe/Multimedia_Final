@@ -286,6 +286,16 @@ def _fail_click_to_image_space(game, x, y):
     return image_x, image_y
 
 
+def _win_click_to_image_space(game, x, y):
+    if game.win_img is None:
+        return x, y
+
+    img_h, img_w = game.win_img.shape[:2]
+    image_x = int(x * img_w / game.DISPLAY_W)
+    image_y = int(y * img_h / game.DISPLAY_H)
+    return image_x, image_y
+
+
 def _start_button_clicked(game, x, y):
     image_x, image_y = _menu_click_to_image_space(game, x, y)
     bx, by, bw, bh = game.start_button_rect
@@ -300,6 +310,16 @@ def _fail_restart_clicked(game, x, y):
 def _fail_menu_clicked(game, x, y):
     image_x, image_y = _fail_click_to_image_space(game, x, y)
     return 44 <= image_x <= 273 and 557 <= image_y <= 607
+
+
+def _win_play_again_clicked(game, x, y):
+    image_x, image_y = _win_click_to_image_space(game, x, y)
+    return 50 <= image_x <= 267 and 420 <= image_y <= 468
+
+
+def _win_menu_clicked(game, x, y):
+    image_x, image_y = _win_click_to_image_space(game, x, y)
+    return 50 <= image_x <= 267 and 491 <= image_y <= 539
 
 
 def enter_fail_transition(game, now_ms):
@@ -317,6 +337,16 @@ def draw_fail_screen(game):
         return cv2.resize(game.fail_img, (game.DISPLAY_W, game.DISPLAY_H), interpolation=cv2.INTER_AREA)
 
     return game.fail_img.copy()
+
+
+def draw_win_screen(game):
+    if game.win_img is None:
+        return np.zeros((game.DISPLAY_H, game.DISPLAY_W, 3), dtype=np.uint8)
+
+    if game.win_img.shape[1] != game.DISPLAY_W or game.win_img.shape[0] != game.DISPLAY_H:
+        return cv2.resize(game.win_img, (game.DISPLAY_W, game.DISPLAY_H), interpolation=cv2.INTER_AREA)
+
+    return game.win_img.copy()
 
 
 def draw_fail_transition(game, now_ms):
@@ -572,17 +602,16 @@ def handle_mouse_event(game, event, x, y, flags, param):
                 print("Game Starting...")
                 start_battle_countdown(game, int(time.time() * 1000))
         elif game.state == "WIN":
-            bx, by, bw, bh = game.menu_button_rect
-            if bx <= x <= bx + bw and by <= y <= by + bh:
-                game.reset_match()
-                game.state = "START_MENU"
+            if _win_play_again_clicked(game, x, y):
+                start_battle_countdown(game, int(time.time() * 1000))
+            elif _win_menu_clicked(game, x, y):
+                game.go_to_start_menu(reset_match=True)
         elif game.state == "FAIL":
             if _fail_restart_clicked(game, x, y):
                 game.reset_match()
                 game.state = "RUNNING"
             elif _fail_menu_clicked(game, x, y):
-                game.reset_match()
-                game.state = "START_MENU"
+                game.go_to_start_menu(reset_match=True)
         elif game.state == "RUNNING":
             game.mouse_dragging = True
             game.drag_offset_x = game.ship_controller.x - x

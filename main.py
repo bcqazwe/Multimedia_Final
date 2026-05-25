@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import time
 import os
+import ctypes
 import audio
 import ui_screens
 
@@ -41,9 +42,10 @@ def ensure_bgr(image):
 
 class Game:
     def __init__(self):
-        # 設定視窗解析度
+        # 設定基礎解析度（遊戲邏輯座標）
         self.WINDOW_W, self.WINDOW_H = 320, 640
-        self.DISPLAY_W, self.DISPLAY_H = self.WINDOW_W * 2, self.WINDOW_H * 2
+        self.display_scale = self._choose_display_scale(preferred_scale=2)
+        self.DISPLAY_W, self.DISPLAY_H = self.WINDOW_W * self.display_scale, self.WINDOW_H * self.display_scale
 
         # 直接重用 Background.py 的背景捲動邏輯
         self.background = BackgroundScroller(
@@ -51,6 +53,7 @@ class Game:
             window_w=self.WINDOW_W,
             window_h=self.WINDOW_H,
             scroll_speed=2,
+            display_scale=self.display_scale,
         )
         
         # 載入玩家船隻 (包含 Alpha channel)
@@ -103,6 +106,8 @@ class Game:
         self.menu_img = ensure_bgr(self.menu_img)
         self.fail_img = imread_unicode(asset_path('fail.jpg'), cv2.IMREAD_UNCHANGED)
         self.fail_img = ensure_bgr(self.fail_img)
+        self.win_img = imread_unicode(asset_path('win.jpg'), cv2.IMREAD_UNCHANGED)
+        self.win_img = ensure_bgr(self.win_img)
         self.boss_phase_hp = 3333
         self.dual_attack_mode = False
         self.fail_transition_started_ms = 0
@@ -124,6 +129,29 @@ class Game:
         self.phase1_to_2_transition_ended_ms = 0
         self.audio_manager = audio.AudioManager()
         self._audio_synced_state = None
+
+    def _get_primary_screen_size(self):
+        try:
+            user32 = ctypes.windll.user32
+            try:
+                # 讓取得的解析度符合實際 DPI 縮放後的像素
+                user32.SetProcessDPIAware()
+            except Exception:
+                pass
+            return int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))
+        except Exception:
+            return None, None
+
+    def _choose_display_scale(self, preferred_scale=2):
+        screen_w, screen_h = self._get_primary_screen_size()
+        if not screen_w or not screen_h:
+            return int(preferred_scale)
+
+        # 保留視窗邊框和工作列空間，避免 1080p 高度超出螢幕
+        safe_w = max(1, screen_w - 48)
+        safe_h = max(1, screen_h - 120)
+        fit_scale = min(safe_w // self.WINDOW_W, safe_h // self.WINDOW_H)
+        return max(1, min(int(preferred_scale), int(fit_scale)))
         
     def overlay_image(self, background, overlay, x, y):
         """將具有透明度的圖片疊加到背景上"""
@@ -152,31 +180,18 @@ class Game:
         return background
 
     def draw_win_screen(self):
-        display_frame = self.background.get_display_frame()
-
-        dark_overlay = np.zeros_like(display_frame)
-        display_frame = cv2.addWeighted(display_frame, 0.35, dark_overlay, 0.65, 0)
-
-        font = cv2.FONT_HERSHEY_DUPLEX
-        cv2.putText(display_frame, "YOU WIN", (self.DISPLAY_W // 2 - 170, self.DISPLAY_H // 2 - 50), font, 2.4, (255, 255, 255), 4, cv2.LINE_AA)
-        cv2.putText(display_frame, "BOSS DEFEATED", (self.DISPLAY_W // 2 - 180, self.DISPLAY_H // 2), font, 1.2, (220, 220, 220), 2, cv2.LINE_AA)
-
-        bx, by, bw, bh = self.menu_button_rect
-        cv2.rectangle(display_frame, (bx, by), (bx + bw, by + bh), (210, 210, 210), -1)
-        cv2.putText(display_frame, "MAIN MENU", (bx + 28, by + 40), font, 1, (0, 0, 0), 2, cv2.LINE_AA)
-
-        return display_frame
+        return ui_screens.draw_win_screen(self)
 
     def play_intro_video(self):
         if self.intro_played or not os.path.exists(self.intro_video_path):
             self.intro_played = True
-            self.state = "START_MENU"
+            self.go_to_start_menu(reset_match=False)
             return
 
         capture = cv2.VideoCapture(self.intro_video_path)
         if not capture.isOpened():
             self.intro_played = True
-            self.state = "START_MENU"
+            self.go_to_start_menu(reset_match=False)
             return
 
         cv2.namedWindow('Space Shooter')
@@ -193,12 +208,12 @@ class Game:
 
                 key = cv2.waitKey(30) & 0xFF
                 if key == ord('q') or key == ord('Q'):
-                    self.state = "START_MENU"
+                    self.go_to_start_menu(reset_match=False)
                     self.intro_played = True
                     return
 
             self.intro_played = True
-            self.state = "START_MENU"
+            self.go_to_start_menu(reset_match=False)
         finally:
             capture.release()
 
@@ -286,7 +301,17 @@ class Game:
         self.phase1_to_2_transition_active = False
         self.phase1_to_2_transition_started_ms = 0
         self.phase1_to_2_transition_ended_ms = 0
+        self._audio_synced_state = None
+        self.audio_manager.stop_all_music()
         self.audio_manager.reset_phase3_warning_guard()
+
+    def go_to_start_menu(self, reset_match=True):
+        if reset_match:
+            self.reset_match()
+        self.state = "START_MENU"
+        self.mouse_dragging = False
+        self._audio_synced_state = None
+        self.audio_manager.stop_all_music()
 
     def _sync_weapon_level(self):
         level_to_shots = {1: 1, 2: 2, 3: 4}
@@ -332,34 +357,61 @@ class Game:
     def _add_score_for_damage(self):
         self.score += int(50 * self.multiplier)
 
-    def _sync_background_music(self, phase):
-        desired_track = None
-
+    def _get_desired_bgm_track(self, phase):
         if self.state == "START_MENU":
-            desired_track = "menu"
-        elif self.state == "RUNNING":
-            if phase == 1 and not ui_screens.is_soft_pulse_transition_active(self):
-                desired_track = "stage1"
-            elif phase == 2 and not ui_screens.is_soft_pulse_transition_active(self) and not ui_screens.is_phase_transition_active(self):
-                desired_track = "stage2"
-        elif self.state == "PRE_BATTLE":
-            desired_track = None
+            return "menu"
+
+        if self.state == "FAIL":
+            return "fail"
+
+        if self.state != "RUNNING":
+            if self.state == "WIN":
+                return "win"
+            # PRE_BATTLE/transition states currently keep BGM muted.
+            return None
+
+        if ui_screens.is_soft_pulse_transition_active(self) or ui_screens.is_phase_transition_active(self):
+            return None
+
+        if phase == 1:
+            return "stage1"
+        if phase == 2:
+            return "stage2"
+        return "stage3"
+
+    def _sync_background_music(self, phase):
+        desired_track = self._get_desired_bgm_track(phase)
 
         if desired_track == self._audio_synced_state:
             return
 
-        if desired_track == "menu":
-            self.audio_manager.play_menu_music()
-        elif desired_track == "stage1":
-            self.audio_manager.play_stage1_music()
-        elif desired_track == "stage2":
-            self.audio_manager.play_stage2_music()
-        else:
-            self.audio_manager.fadeout_menu_music()
-            self.audio_manager.fadeout_stage1_music()
-            self.audio_manager.fadeout_stage2_music()
+        if desired_track is None:
+            # Keep warning SFX only during phase transition states.
+            # On FAIL/WIN and other non-running states, silence everything.
+            if self.state in ("PHASE_GLITCH", "PHASE_PULSE"):
+                self.audio_manager.stop_bgm()
+            else:
+                self.audio_manager.stop_all_music()
+            self._audio_synced_state = None
+            return
+        self.audio_manager.stop_all_music()
+        play_by_track = {
+            "menu": self.audio_manager.play_menu_music,
+            "stage1": self.audio_manager.play_stage1_music,
+            "stage2": self.audio_manager.play_stage2_music,
+            "stage3": self.audio_manager.play_stage3_music,
+            "fail": self.audio_manager.play_fail_music,
+            "win": self.audio_manager.play_win_music,
+        }
 
-        self._audio_synced_state = desired_track
+        switched = play_by_track[desired_track]()
+
+        # Only commit sync state after a successful switch.
+        # If switching fails, keep it unsynced so next frame can retry.
+        if switched:
+            self._audio_synced_state = desired_track
+        else:
+            self._audio_synced_state = None
 
     def downgrade_weapon(self):
         if self.weapon_level > 1:
@@ -380,6 +432,9 @@ class Game:
                 self.upgrade_weapon()
             elif item_kind == "heal":
                 self.player_health.heal(20)
+
+        if collected_kinds:
+            self.audio_manager.play_get_item_sound_once()
 
     def _get_ship_core_rect(self):
         ship_x = self.ship_controller.x
@@ -537,6 +592,8 @@ class Game:
 
         while True:
             now_ms = int(time.time() * 1000)
+            if self.state == "START_MENU" and self.boss_health.current_hp != 9999:
+                self.reset_match()
             phase, _, _, _ = self._get_boss_phase_info()
             self._sync_background_music(phase)
 
@@ -589,7 +646,7 @@ class Game:
             if self.state == "START_MENU":
                 frame = ui_screens.draw_start_menu(self)
             elif self.state == "WIN":
-                frame = self.draw_win_screen()
+                frame = ui_screens.draw_win_screen(self)
             elif self.state == "PRE_BATTLE":
                 frame = self.draw_game_frame(now_ms)
                 frame = ui_screens.draw_battle_countdown_overlay(self, frame, now_ms)
@@ -619,13 +676,7 @@ class Game:
             if key == ord('q') or key == ord('Q'):
                 break
             elif key == ord('m') or key == ord('M'):
-                self.reset_match()
-                self.state = "START_MENU"
-                self.ship_controller.reset()
-                self.bullet_controller.bullets.clear()
-                self.bullet_controller.last_fire_time = 0
-                self.item_controller.reset()
-                self.mouse_dragging = False
+                self.go_to_start_menu(reset_match=True)
             elif key == ord('s') or key == ord('S'):
                 if self.state == "START_MENU":
                     ui_screens.start_battle_countdown(self, now_ms)
